@@ -1,0 +1,46 @@
+[project]
+name = "crunchyroll-anilist-sync"
+version = "0.1.0"
+description = "A tool to sync Crunchyroll watch history with AniList progress"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "Michael Price", email = "Michael.Price@PlumSolutions.net"},
+]
+
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "selenium>=4.15.0",
+    "undetected-chromedriver>=3.5.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+]
+
+[project.scripts]
+crunchyroll-anilist-sync = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

@@ -1,0 +1,24 @@
+version: '3.8'
+  services:
+    flaresolverr:
+      image: ghcr.io/flaresolverr/flaresolverr:latest
+      container_name: flaresolverr
+      environment:
+        - LOG_LEVEL=info
+      ports:
+        - "8191:8191"
+      restart: unless-stopped
+
+    sync:
+      build: .
+      container_name: crunchyroll-anilist-sync
+      depends_on:
+        - flaresolverr
+      environment:
+        - FLARESOLVERR_URL=http://flaresolverr:8191
+        - HEADLESS=true
+      env_file:
+        - .env
+      volumes:
+        - ./_cache:/app/_cache
+        - ./logs:/app/logs
