@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import logging
 
-from scraper import CrunchyrollScraper
+from scrapers import CrunchyrollScraper
 from anilist_client import AniListClient
 from anime_matcher import AnimeMatcher
 from history_parser import CrunchyrollHistoryParser
@@ -23,7 +23,14 @@ class SyncManager:
         self.crunchyroll_password = crunchyroll_password
         self.dev_mode = dev_mode
         
-        self.scraper = CrunchyrollScraper(headless=headless, flaresolverr_url=flaresolverr_url)
+        # Initialize scraper with credentials
+        self.scraper = CrunchyrollScraper(
+            email=crunchyroll_email,
+            password=crunchyroll_password,
+            flaresolverr_url=flaresolverr_url,
+            headless=headless,
+            dev_mode=dev_mode
+        )
         self.anilist = AniListClient(anilist_client_id, anilist_client_secret)
         self.matcher = AnimeMatcher()
         self.history_parser = CrunchyrollHistoryParser()
@@ -133,10 +140,11 @@ class SyncManager:
     
     def _get_crunchyroll_history(self) -> Optional[Dict[str, Any]]:
         """Get watch history from Crunchyroll"""
-        soup = self.scraper.scrape_history_page()
+        # Use pagination by default
+        soup = self.scraper.scrape_history_page(use_pagination=True)
         
         if soup:
-            logger.info("✅ Successfully scraped history page")
+            logger.info("✅ Successfully scraped history page with pagination")
             
             # Save raw HTML in dev mode
             if self.dev_mode:
@@ -155,22 +163,14 @@ class SyncManager:
                     logger.info(f"📊 Parsed {len(parsed_data.get('items', []))} history items")
                     return parsed_data
                 else:
-                    logger.error("❌ Failed to parse any history items from HTML")
+                    logger.warning("No history data could be parsed")
+                    return None
             except Exception as e:
-                logger.error(f"❌ Error parsing history page: {e}")
-                
-                # Save the problematic HTML for debugging
-                if self.dev_mode:
-                    try:
-                        error_file = "_cache/error_history_page.html"
-                        with open(error_file, 'w', encoding='utf-8') as f:
-                            f.write(str(soup.prettify()))
-                        logger.error(f"🐛 Problematic HTML saved to {error_file}")
-                    except:
-                        pass
-        
-        logger.error("❌ Failed to get history via both API and page scraping")
-        return None
+                logger.error(f"Failed to parse history data: {e}")
+                return None
+        else:
+            logger.error("❌ Failed to scrape history page")
+            return None
     
     def _process_history(self, history_data: Dict[str, Any]) -> int:
         """Process history data and update AniList"""

@@ -308,45 +308,79 @@ class AniListClient:
             logger.error(f"❌ Error updating anime status: {e}")
             return False
 
-    def update_anime_progress(self, media_id: int, episode_number: int, status: Optional[str] = None) -> bool:
-        """Update anime progress using GraphQL mutation"""
-        try:
-            mutation = """
-            mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus) {
-                SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: $status) {
-                    id
-                    progress
-                    status
-                    media {
-                        title {
-                            romaji
-                        }
-                    }
-                }
-            }
-            """
-            
-            variables = {
-                'mediaId': media_id,
-                'progress': episode_number
-            }
-            
-            if status:
-                # Convert status to AniList format
-                anilist_status = status.upper() if status.upper() in ['CURRENT', 'COMPLETED', 'PAUSED', 'DROPPED', 'PLANNING'] else 'CURRENT'
-                variables['status'] = anilist_status
-            
-            result = self._execute_query(mutation, variables)
-            
-            if result and 'data' in result and 'SaveMediaListEntry' in result['data']:
-                entry = result['data']['SaveMediaListEntry']
-                anime_title = entry.get('media', {}).get('title', {}).get('romaji', 'Unknown')
-                logger.info(f"📺 Updated progress: {anime_title} -> Episode {episode_number}" + 
-                           (f" [Status: {entry.get('status', 'N/A')}]" if entry.get('status') else ""))
-                return True
-            
+    def update_anime_progress(self, anime_id, progress, status=None):
+        """
+        Update anime progress on AniList
+        
+        Args:
+            anime_id: The AniList anime ID
+            progress: Episode number to update to
+            status: Optional status ('CURRENT', 'COMPLETED', 'PAUSED', 'DROPPED', 'PLANNING')
+        """
+        if not self.access_token:
+            logger.error("No access token available")
             return False
+        
+        # Prepare the mutation variables
+        variables = {
+            'mediaId': anime_id,
+            'progress': progress
+        }
+        
+        # Add status if provided
+        if status:
+            variables['status'] = status
+        
+        # Build the mutation query
+        mutation_fields = ['id', 'progress']
+        variable_fields = ['$mediaId: Int', '$progress: Int']
+        
+        if status:
+            mutation_fields.append('status')
+            variable_fields.append('$status: MediaListStatus')
+        
+        query = f"""
+        mutation ({', '.join(variable_fields)}) {{
+            SaveMediaListEntry(mediaId: $mediaId, progress: $progress{', status: $status' if status else ''}) {{
+                {' '.join(mutation_fields)}
+            }}
+        }}
+        """
+        
+        try:
+            response = requests.post(
+                self.graphql_url,  # Changed from self.api_url to self.graphql_url
+                json={
+                    'query': query,
+                    'variables': variables
+                },
+                headers={
+                    'Authorization': f'Bearer {self.access_token}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                timeout=30
+            )
             
+            if response.status_code == 200:
+                data = response.json()
+                if 'errors' in data:
+                    logger.error(f"AniList API errors: {data['errors']}")
+                    return False
+                
+                entry = data.get('data', {}).get('SaveMediaListEntry', {})
+                if entry:
+                    updated_progress = entry.get('progress', 0)
+                    updated_status = entry.get('status', 'UNKNOWN')
+                    logger.info(f"Successfully updated anime {anime_id} - Progress: {updated_progress}, Status: {updated_status}")
+                    return True
+                else:
+                    logger.error("No entry data in response")
+                    return False
+            else:
+                logger.error(f"HTTP error {response.status_code}: {response.text}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Progress update failed: {e}")
+            logger.error(f"Error updating anime progress: {e}")
             return False

@@ -47,25 +47,39 @@ class AuthCache:
     def load_crunchyroll_auth(self) -> Optional[Dict[str, Any]]:
         """Load cached Crunchyroll authentication data"""
         try:
+            logger.info(f"Loading cache from: {self.cache_file}")
             cache_data = self._load_cache()
+            logger.debug(f"Cache data keys: {list(cache_data.keys()) if cache_data else 'None'}")
 
             cr_auth = cache_data.get('crunchyroll')
             if not cr_auth:
                 logger.debug("No cached Crunchyroll auth found")
                 return None
 
+            logger.debug(f"Found Crunchyroll auth with expires_at: {cr_auth.get('expires_at')}")
+            
             # Check if expired
-            expires_at = datetime.fromisoformat(cr_auth.get('expires_at', '2000-01-01'))
-            if datetime.now() > expires_at:
-                logger.info("Cached Crunchyroll auth has expired")
-                self.clear_crunchyroll_auth()
+            expires_at_str = cr_auth.get('expires_at', '2000-01-01')
+            try:
+                expires_at = datetime.fromisoformat(expires_at_str)
+                current_time = datetime.now()
+                logger.debug(f"Current time: {current_time}, Expires at: {expires_at}")
+                
+                if current_time > expires_at:
+                    logger.info("❌ Cached Crunchyroll auth has expired")
+                    return None
+                else:
+                    time_remaining = expires_at - current_time
+                    logger.info(f"✅ Cached Crunchyroll auth is still valid (expires in {time_remaining})")
+                    
+            except ValueError as e:
+                logger.warning(f"Invalid expires_at format: {expires_at_str}, treating as expired: {e}")
                 return None
 
-            logger.info("Loaded cached Crunchyroll authentication")
             return cr_auth
 
         except Exception as e:
-            logger.error(f"Failed to load cached Crunchyroll auth: {e}")
+            logger.error(f"Failed to load Crunchyroll auth: {e}")
             return None
 
     def save_anilist_auth(self, access_token: str, user_id: int, user_name: str) -> bool:
