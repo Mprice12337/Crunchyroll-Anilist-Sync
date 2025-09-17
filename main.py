@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for Crunchyroll-AniList Sync
+Main entry point for Crunchyroll-AniList Sync with clean logging
 """
 
 import os
@@ -20,13 +20,13 @@ load_dotenv()
 
 
 def setup_logging(debug: bool = False) -> None:
-    """Setup logging configuration"""
+    """Setup logging configuration with clean output"""
     log_level = logging.DEBUG if debug else logging.INFO
 
     # Create logs directory
     Path("logs").mkdir(exist_ok=True)
 
-    # Configure logging
+    # Configure main logging
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -36,6 +36,26 @@ def setup_logging(debug: bool = False) -> None:
         ]
     )
 
+    # **SUPPRESS SELENIUM/URLLIB3 HTML LOGGING**
+    # These loggers output massive HTML content that clutters logs
+    logging.getLogger('selenium.webdriver.remote.remote_connection').setLevel(logging.WARNING)
+    logging.getLogger('selenium.webdriver.common.service').setLevel(logging.WARNING)
+    logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
+    logging.getLogger('undetected_chromedriver').setLevel(logging.WARNING)
+
+    # Keep our application debug logs but suppress third-party noise
+    if debug:
+        logging.getLogger('src').setLevel(logging.DEBUG)
+        logging.getLogger('crunchyroll_scraper').setLevel(logging.DEBUG)
+        logging.getLogger('anilist_client').setLevel(logging.DEBUG)
+        logging.getLogger('anime_matcher').setLevel(logging.DEBUG)
+        logging.getLogger('sync_manager').setLevel(logging.DEBUG)
+        logging.getLogger('__main__').setLevel(logging.DEBUG)
+
+        # But keep Selenium quiet even in debug mode
+        logging.getLogger('selenium').setLevel(logging.INFO)
+        logging.getLogger('urllib3').setLevel(logging.INFO)
+
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments"""
@@ -44,7 +64,7 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument('--debug', action='store_true',
-                        help='Enable debug logging')
+                        help='Enable debug logging (but suppress HTML spam)')
     parser.add_argument('--headless', action='store_true', default=True,
                         help='Run browser in headless mode (default)')
     parser.add_argument('--no-headless', action='store_true',
@@ -84,7 +104,7 @@ def main() -> int:
     """Main entry point"""
     args = parse_arguments()
 
-    # Setup logging
+    # Setup clean logging (suppress Selenium HTML spam)
     setup_logging(args.debug)
     logger = logging.getLogger(__name__)
 
