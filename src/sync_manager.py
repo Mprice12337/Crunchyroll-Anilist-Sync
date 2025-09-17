@@ -4,7 +4,7 @@ Enhanced sync manager with improved grouping logic and better logging
 
 import logging
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 
 from crunchyroll_scraper import CrunchyrollScraper
@@ -184,18 +184,22 @@ class SyncManager:
         return True
 
     def _group_episodes_by_series_and_season_improved(self, episodes: List[Dict]) -> Dict[tuple, int]:
-        """Group episodes by series and season with improved logging and validation"""
+        """Group episodes by series and season with improved validation and debugging"""
         series_season_progress = {}
         processed_count = 0
         skipped_count = 0
+        conversion_count = 0
 
         logger.info("🗂️ Grouping episodes by series and season...")
 
-        # First, let's see what we have
+        # Track what we're seeing
+        series_episode_counts = {}  # Track episodes per series for debugging
+
         for episode in episodes:
             series_title = episode.get('series_title', '').strip()
             episode_number = episode.get('episode_number', 0)
             season = episode.get('season', 1)
+            raw_episode_data = episode.get('raw_text', '')[:100]  # For debugging
 
             if not series_title:
                 logger.debug(f"Skipping episode - no series title: {episode}")
@@ -203,11 +207,32 @@ class SyncManager:
                 continue
 
             if not episode_number or episode_number <= 0:
-                logger.debug(f"Skipping episode - no/invalid episode number: {series_title} - {episode}")
+                logger.warning(
+                    f"Skipping episode - no/invalid episode number: {series_title} S{season} - Raw: {raw_episode_data}")
                 skipped_count += 1
                 continue
 
+            # IMPROVED: Validate episode number with AniList before grouping
+            if hasattr(self, 'episode_converter') and self.episode_converter:
+                # Try to get a quick validation without full AniList search
+                original_episode = episode_number
+                validated_episode, was_converted, reason = self._validate_episode_number(
+                    series_title, season, episode_number
+                )
+
+                if was_converted:
+                    episode_number = validated_episode
+                    conversion_count += 1
+                    logger.debug(
+                        f"Pre-grouping conversion: {series_title} S{season} E{original_episode} → E{episode_number} ({reason})")
+
             processed_count += 1
+
+            # Track episodes per series for debugging
+            series_key = f"{series_title} S{season}"
+            if series_key not in series_episode_counts:
+                series_episode_counts[series_key] = []
+            series_episode_counts[series_key].append(episode_number)
 
             # Create key for series-season combination
             key = (series_title, season)
@@ -220,26 +245,32 @@ class SyncManager:
                 old_episode = series_season_progress[key]
                 if episode_number > old_episode:
                     series_season_progress[key] = episode_number
-                    logger.debug(f"Updated progress: {series_title} S{season} E{old_episode} -> E{episode_number}")
+                    logger.debug(f"Updated progress: {series_title} S{season} E{old_episode} → E{episode_number}")
 
         self.sync_results['total_episodes'] = len(episodes)
         self.sync_results['skipped_episodes'] = skipped_count
 
-        logger.info(f"✅ Processed {processed_count} episodes, skipped {skipped_count}")
-        logger.info(f"📊 Found {len(series_season_progress)} unique series-season combinations:")
+        logger.info(f"✅ Processed {processed_count} episodes, skipped {skipped_count}, converted {conversion_count}")
 
-        # Log all series-seasons for transparency
+        # IMPROVED: Show detailed episode breakdown per series
+        logger.info(f"📊 Detailed episode breakdown:")
+        for series_season, episode_list in series_episode_counts.items():
+            episode_range = f"E{min(episode_list)}-E{max(episode_list)}" if len(
+                episode_list) > 1 else f"E{episode_list[0]}"
+            logger.info(f"  {series_season}: {len(episode_list)} episodes ({episode_range})")
+
+        logger.info(f"📊 Final series-season progress (latest episodes only):")
         for i, ((series, season), episode) in enumerate(sorted(series_season_progress.items()), 1):
             logger.info(f"  {i:2d}. {series} (Season {season}) - Latest: Episode {episode}")
 
         return series_season_progress
 
     def _update_series_season_progress(self, series_title: str, season: int, episode_number: int) -> bool:
-        """Update progress for a specific series and season on AniList with enhanced logging"""
+        """Enhanced method with AniList-based episode validation"""
         try:
             logger.info(f"🔍 Searching AniList for: {series_title} (Season {season})")
 
-            # Search for anime on AniList
+            # Search for anime on AniList FIRST
             search_results = self.anilist_client.search_anime(series_title)
             if not search_results:
                 logger.warning(f"❌ No AniList results found for: {series_title}")
@@ -262,6 +293,17 @@ class SyncManager:
             anime_id = best_match['id']
             anime_title = best_match.get('title', {}).get('romaji', series_title)
             total_episodes = best_match.get('episodes')
+
+            # CRITICAL: Validate episode number with AniList data
+            validated_episode, was_adjusted, adjustment_reason = self._validate_episode_with_anilist(
+                episode_number, total_episodes, series_title, matched_season
+            )
+
+            if was_adjusted:
+                logger.info(
+                    f"📊 Episode validation: {series_title} S{matched_season} E{episode_number} → E{validated_episode}")
+                logger.info(f"   Reason: {adjustment_reason}")
+                episode_number = validated_episode
 
             # Check if season matches
             if matched_season == season:
@@ -350,6 +392,34 @@ class SyncManager:
 
         if results['no_matches_found'] > 0:
             logger.info("💡 Tip: No matches may indicate very new anime or title differences between services")
+
+    def _validate_episode_with_anilist(self, episode_number: int, total_episodes: Optional[int],
+                                       series_title: str, season: int) -> Tuple[int, bool, str]:
+        """Validate episode number against AniList data"""
+
+        if not total_episodes:
+            return episode_number, False, "No episode count available from AniList"
+
+        # If episode number is within expected range, it's probably correct
+        if episode_number <= total_episodes:
+            return episode_number, False, f"Episode {episode_number} is within expected range (≤{total_episodes})"
+
+        # Episode number is higher than expected - might need conversion
+        logger.warning(
+            f"Episode {episode_number} is higher than expected {total_episodes} for {series_title} S{season}")
+
+        # Try to convert from absolute to per-season
+        if season > 1:
+            # Conservative estimate: assume ~12-13 episodes per previous season
+            estimated_prev_episodes = (season - 1) * 12
+            converted_episode = episode_number - estimated_prev_episodes
+
+            if 1 <= converted_episode <= total_episodes:
+                return converted_episode, True, f"Converted from absolute episode (estimated {estimated_prev_episodes} previous episodes)"
+
+        # If we can't convert confidently, keep original but warn
+        logger.warning(f"Keeping original episode {episode_number} - conversion not confident")
+        return episode_number, False, "Kept original - conversion not confident"
 
     def _save_enhanced_debug_data(self, filename: str, data: Any) -> None:
         """Save enhanced debug data with better formatting"""

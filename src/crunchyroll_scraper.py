@@ -40,7 +40,7 @@ class CrunchyrollScraper:
         self.combined_pattern = re.compile(r'S(\d+)\s+E(\d+)', re.IGNORECASE)  # S2 E20
         self.episode_only_pattern = re.compile(r'\bE(\d+)\b', re.IGNORECASE)  # E20
 
-        self.episode_converter = EpisodeNumberConverter()
+        self.episode_converter = None
 
     def authenticate(self) -> bool:
         """Authenticate with Crunchyroll"""
@@ -260,16 +260,8 @@ class CrunchyrollScraper:
             # Extract season and episode with improved patterns
             season_number, episode_number = self._extract_season_episode_improved(all_text, episode_title)
 
-            # NEW: Convert absolute episode numbers to per-season if needed
-            if series_title and episode_number > 0:
-                original_episode = episode_number
-                episode_number = self.episode_converter.convert_episode_number(
-                    series_title, season_number, episode_number, logger
-                )
-
-                if episode_number != original_episode:
-                    logger.debug(
-                        f"Episode conversion: {series_title} S{season_number} E{original_episode}→E{episode_number}")
+            # REMOVED: Episode conversion here - let sync_manager handle it with AniList data
+            # The episode_number stays as parsed from Crunchyroll
 
             # Get URLs
             series_url = ""
@@ -290,13 +282,31 @@ class CrunchyrollScraper:
                     'series_url': series_url,
                     'episode_url': episode_url,
                     'raw_text': all_text,  # Keep for debugging
-                    'timestamp': None
+                    'timestamp': None,
+                    'parsing_confidence': self._assess_parsing_confidence(season_number, episode_number, all_text)
                 }
 
         except Exception as e:
             logger.debug(f"Error extracting card data: {e}")
 
         return None
+
+
+    def _assess_parsing_confidence(self, season: int, episode: int, raw_text: str) -> str:
+        """Assess confidence in parsing results"""
+        confidence = "high"
+
+        if season > 5:
+            confidence = "low"  # Suspicious season number
+
+        if episode > 30 and season > 1:
+            confidence = "medium"  # Might be absolute episode number
+
+        # Check if we found clear season/episode indicators
+        if "S" + str(season) in raw_text and "E" + str(episode) in raw_text:
+            confidence = "high"
+
+        return confidence
 
     def _extract_season_episode_improved(self, all_text: str, episode_title: str) -> tuple[int, int]:
         """Extract season and episode numbers with improved pattern matching"""
@@ -308,7 +318,7 @@ class CrunchyrollScraper:
 
         logger.debug(f"Analyzing text for season/episode: '{combined_text[:100]}...'")
 
-        # Try combined pattern first (S2 E20)
+        # Try combined pattern first (S2 E20) - MOST RELIABLE
         combined_match = self.combined_pattern.search(combined_text)
         if combined_match:
             season_number = int(combined_match.group(1))
@@ -316,17 +326,38 @@ class CrunchyrollScraper:
             logger.debug(f"Combined pattern match: S{season_number} E{episode_number}")
             return season_number, episode_number
 
-        # Try season pattern (S2 or Season 2)
-        season_match = self.season_pattern.search(combined_text)
-        if season_match:
-            season_number = int(season_match.group(1))
-            logger.debug(f"Season pattern match: S{season_number}")
+        # Try season pattern (S2 or Season 2) - but be more careful
+        season_matches = self.season_pattern.findall(combined_text)
+        if season_matches:
+            # Take the first reasonable season number
+            for season_str in season_matches:
+                try:
+                    potential_season = int(season_str)
+                    if 1 <= potential_season <= 5:  # Reasonable season range
+                        season_number = potential_season
+                        break
+                except ValueError:
+                    continue
 
-        # Try episode pattern (E20)
-        episode_match = self.episode_only_pattern.search(combined_text)
-        if episode_match:
-            episode_number = int(episode_match.group(1))
-            logger.debug(f"Episode pattern match: E{episode_number}")
+        # Try episode pattern (E20) - but validate it makes sense
+        episode_matches = self.episode_only_pattern.findall(combined_text)
+        if episode_matches:
+            # Take the first reasonable episode number
+            for episode_str in episode_matches:
+                try:
+                    potential_episode = int(episode_str)
+                    if 1 <= potential_episode <= 50:  # Reasonable episode range
+                        episode_number = potential_episode
+                        break
+                except ValueError:
+                    continue
+
+        # IMPORTANT: Validate the combination makes sense
+        if season_number > 5 and episode_number < 20:
+            # This is likely a parsing error - probably should be season 1
+            logger.warning(
+                f"Suspicious parsing: S{season_number} E{episode_number} - likely parsing error, correcting to S1")
+            season_number = 1
 
         logger.debug(f"Final result: S{season_number} E{episode_number}")
         return season_number, episode_number
