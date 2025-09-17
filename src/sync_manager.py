@@ -1,427 +1,267 @@
-"""Main sync manager that coordinates Crunchyroll scraping and AniList updates"""
-import json
-import time
-import os
-from typing import Dict, Any, List, Optional
-from datetime import datetime
-import logging
+"""
+Simplified sync manager that coordinates Crunchyroll scraping and AniList updates
+"""
 
-from scrapers import CrunchyrollScraper
+import logging
+import time
+from typing import Dict, List, Any, Optional
+from pathlib import Path
+
+from crunchyroll_scraper import CrunchyrollScraper
 from anilist_client import AniListClient
 from anime_matcher import AnimeMatcher
-from history_parser import CrunchyrollHistoryParser
+from cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
 
 class SyncManager:
-    def __init__(self, crunchyroll_email: str, crunchyroll_password: str, 
-                 anilist_client_id: str, anilist_client_secret: str,
-                 flaresolverr_url: Optional[str] = None, headless: bool = True,
-                 dev_mode: bool = False):
-        
-        self.crunchyroll_email = crunchyroll_email
-        self.crunchyroll_password = crunchyroll_password
-        self.dev_mode = dev_mode
-        
-        # Initialize scraper with credentials
-        self.scraper = CrunchyrollScraper(
-            email=crunchyroll_email,
-            password=crunchyroll_password,
-            flaresolverr_url=flaresolverr_url,
-            headless=headless,
-            dev_mode=dev_mode
+    """Manages the complete sync process between Crunchyroll and AniList"""
+
+    def __init__(self, **config):
+        self.config = config
+        self.cache_manager = CacheManager()
+
+        # Initialize components
+        self.crunchyroll_scraper = CrunchyrollScraper(
+            email=config['crunchyroll_email'],
+            password=config['crunchyroll_password'],
+            headless=config.get('headless', True),
+            flaresolverr_url=config.get('flaresolverr_url')
         )
-        self.anilist = AniListClient(anilist_client_id, anilist_client_secret)
-        self.matcher = AnimeMatcher()
-        self.history_parser = CrunchyrollHistoryParser()
-        
-        self.cache_file = "_cache/sync_cache.json"
-        self.cache = self._load_cache()
-        
-    def _load_cache(self) -> Dict[str, Any]:
-        """Load cache from file"""
+
+        self.anilist_client = AniListClient(
+            client_id=config['anilist_client_id'],
+            client_secret=config['anilist_client_secret']
+        )
+
+        self.anime_matcher = AnimeMatcher()
+
+        # State tracking
+        self.watch_history: List[Dict[str, Any]] = []
+        self.sync_results = {
+            'total_episodes': 0,
+            'successful_updates': 0,
+            'failed_updates': 0,
+            'skipped_episodes': 0
+        }
+
+    def run_sync(self) -> bool:
+        """Execute the complete sync process"""
         try:
-            with open(self.cache_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {
-                'last_sync': None,
-                'anime_mappings': {},
-                'processed_episodes': []
-            }
+            logger.info("Starting sync process...")
+
+            # Clear cache if requested
+            if self.config.get('clear_cache'):
+                logger.info("Clearing cache...")
+                self.cache_manager.clear_all_cache()
+
+            # Step 1: Authenticate with services
+            if not self._authenticate_services():
+                return False
+
+            # Step 2: Scrape Crunchyroll history
+            if not self._scrape_crunchyroll_history():
+                return False
+
+            # Step 3: Process and update AniList
+            if not self._update_anilist_progress():
+                return False
+
+            # Step 4: Report results
+            self._report_results()
+
+            return True
+
         except Exception as e:
-            logger.warning(f"Failed to load cache: {e}")
-            return {
-                'last_sync': None,
-                'anime_mappings': {},
-                'processed_episodes': []
-            }
-    
-    def _save_cache(self):
-        """Save cache to file"""
+            logger.error(f"Sync process failed: {e}")
+            return False
+        finally:
+            self._cleanup()
+
+    def _authenticate_services(self) -> bool:
+        """Authenticate with both Crunchyroll and AniList"""
+        logger.info("🔐 Authenticating with services...")
+
+        # Authenticate with Crunchyroll
+        logger.info("Authenticating with Crunchyroll...")
+        if not self.crunchyroll_scraper.authenticate():
+            logger.error("Failed to authenticate with Crunchyroll")
+            return False
+
+        # Authenticate with AniList
+        logger.info("Authenticating with AniList...")
+        if not self.anilist_client.authenticate():
+            logger.error("Failed to authenticate with AniList")
+            return False
+
+        logger.info("✅ Authentication successful")
+        return True
+
+    def _scrape_crunchyroll_history(self) -> bool:
+        """Scrape watch history from Crunchyroll"""
+        logger.info("📚 Scraping Crunchyroll watch history...")
+
         try:
-            import os
-            os.makedirs('_cache', exist_ok=True)
-            
-            self.cache['last_sync'] = datetime.now().isoformat()
-            
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cache, f, indent=2, ensure_ascii=False)
-                
+            self.watch_history = self.crunchyroll_scraper.get_watch_history(
+                max_pages=self.config.get('max_pages', 10)
+            )
+
+            if not self.watch_history:
+                logger.warning("No watch history found")
+                return True  # Not necessarily an error
+
+            logger.info(f"Found {len(self.watch_history)} episodes in watch history")
+
+            # Save debug data if requested
+            if self.config.get('debug'):
+                self._save_debug_data('watch_history.json', self.watch_history)
+
+            return True
+
         except Exception as e:
-            logger.error(f"Failed to save cache: {e}")
-    
-    def _save_debug_data(self, data: Dict[str, Any], filename: str):
-        """Save debug data to file when in dev mode"""
-        if not self.dev_mode:
-            return
-        
+            logger.error(f"Failed to scrape Crunchyroll history: {e}")
+            return False
+
+    def _update_anilist_progress(self) -> bool:
+        """Process watch history and update AniList progress"""
+        logger.info("🎯 Updating AniList progress...")
+
+        if not self.watch_history:
+            logger.info("No episodes to process")
+            return True
+
+        # Group episodes by series to get latest progress
+        series_progress = self._group_episodes_by_series(self.watch_history)
+
+        logger.info(f"Processing {len(series_progress)} unique series...")
+
+        for i, (series_title, latest_episode) in enumerate(series_progress.items(), 1):
+            try:
+                logger.info(f"[{i}/{len(series_progress)}] Processing: {series_title}")
+
+                if self._update_series_progress(series_title, latest_episode):
+                    self.sync_results['successful_updates'] += 1
+                else:
+                    self.sync_results['failed_updates'] += 1
+
+                # Rate limiting
+                time.sleep(1)
+
+            except Exception as e:
+                logger.error(f"Error processing {series_title}: {e}")
+                self.sync_results['failed_updates'] += 1
+                continue
+
+        return True
+
+    def _group_episodes_by_series(self, episodes: List[Dict]) -> Dict[str, int]:
+        """Group episodes by series and find the latest episode for each"""
+        series_progress = {}
+
+        for episode in episodes:
+            series_title = episode.get('series_title')
+            episode_number = episode.get('episode_number')
+
+            if not series_title or not episode_number:
+                self.sync_results['skipped_episodes'] += 1
+                continue
+
+            # Keep track of the highest episode number for each series
+            if series_title not in series_progress:
+                series_progress[series_title] = episode_number
+            else:
+                series_progress[series_title] = max(series_progress[series_title], episode_number)
+
+        self.sync_results['total_episodes'] = len(episodes)
+
+        return series_progress
+
+    def _update_series_progress(self, series_title: str, episode_number: int) -> bool:
+        """Update progress for a specific series on AniList"""
         try:
-            os.makedirs('_cache', exist_ok=True)
-            
-            debug_file = f"_cache/{filename}"
-            with open(debug_file, 'w', encoding='utf-8') as f:
+            # Search for anime on AniList
+            search_results = self.anilist_client.search_anime(series_title)
+            if not search_results:
+                logger.warning(f"No AniList results found for: {series_title}")
+                return False
+
+            # Find best match
+            match_result = self.anime_matcher.find_best_match(series_title, search_results)
+            if not match_result:
+                logger.warning(f"No suitable match found for: {series_title}")
+                return False
+
+            best_match, similarity = match_result
+            anime_id = best_match['id']
+            anime_title = best_match.get('title', {}).get('romaji', series_title)
+            total_episodes = best_match.get('episodes')
+
+            logger.info(f"Matched to: {anime_title} (ID: {anime_id}, similarity: {similarity:.2f})")
+
+            # Determine status
+            status = None
+            if total_episodes and episode_number >= total_episodes:
+                status = 'COMPLETED'
+                logger.info(f"Marking as completed ({episode_number}/{total_episodes})")
+
+            # Dry run check
+            if self.config.get('dry_run'):
+                logger.info(f"[DRY RUN] Would update {anime_title} to episode {episode_number}")
+                return True
+
+            # Update progress
+            success = self.anilist_client.update_anime_progress(
+                anime_id=anime_id,
+                progress=episode_number,
+                status=status
+            )
+
+            if success:
+                logger.info(f"✅ Updated {anime_title} to episode {episode_number}")
+                return True
+            else:
+                logger.error(f"❌ Failed to update {anime_title}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error updating {series_title}: {e}")
+            return False
+
+    def _report_results(self) -> None:
+        """Report sync results"""
+        results = self.sync_results
+
+        logger.info("📊 Sync Results:")
+        logger.info(f"  Total episodes found: {results['total_episodes']}")
+        logger.info(f"  Successful updates: {results['successful_updates']}")
+        logger.info(f"  Failed updates: {results['failed_updates']}")
+        logger.info(f"  Skipped episodes: {results['skipped_episodes']}")
+
+        if results['successful_updates'] > 0:
+            success_rate = (results['successful_updates'] /
+                          (results['successful_updates'] + results['failed_updates'])) * 100
+            logger.info(f"  Success rate: {success_rate:.1f}%")
+
+    def _save_debug_data(self, filename: str, data: Any) -> None:
+        """Save debug data to cache directory"""
+        try:
+            import json
+            cache_dir = Path('_cache')
+            cache_dir.mkdir(exist_ok=True)
+
+            filepath = cache_dir / filename
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"📝 Debug data saved to {debug_file}")
-            
+
+            logger.debug(f"Debug data saved: {filepath}")
+
         except Exception as e:
             logger.error(f"Failed to save debug data: {e}")
-    
-    def sync(self) -> bool:
-        """Perform complete sync operation"""
+
+    def _cleanup(self) -> None:
+        """Clean up resources"""
         try:
-            logger.info("Starting Crunchyroll-AniList sync...")
-            
-            # Step 1: Authenticate with Crunchyroll only
-            logger.info("Authenticating with Crunchyroll...")
-            if not self.scraper.login(self.crunchyroll_email, self.crunchyroll_password):
-                logger.error("Crunchyroll authentication failed")
-                return False
-            
-            # Step 2: Get Crunchyroll watch history and save it immediately
-            history_data = self._get_crunchyroll_history()
-            if not history_data:
-                logger.error("Failed to get Crunchyroll history")
-                return False
-            
-            # Save raw history data in dev mode (this happens immediately after getting the data)
-            self._save_debug_data(history_data, "raw_history_data.json")
-            logger.info("✅ Crunchyroll data retrieved and saved!")
-            
-            # Step 3: Now authenticate with AniList (after we have the data saved)
-            logger.info("Authenticating with AniList...")
-            if not self.anilist.authenticate():
-                logger.error("AniList authentication failed")
-                # Don't return False here - we still got the Crunchyroll data
-                logger.warning("⚠️  Continuing without AniList sync - Crunchyroll data is saved")
-                return True  # Return True since we got the main data
-            
-            # Step 4: Process history and update AniList
-            updates_made = self._process_history(history_data)
-            
-            # Step 5: Save cache
-            self._save_cache()
-            
-            logger.info(f"Sync completed successfully! Made {updates_made} updates.")
-            return True
-            
+            if hasattr(self.crunchyroll_scraper, 'cleanup'):
+                self.crunchyroll_scraper.cleanup()
         except Exception as e:
-            logger.error(f"Sync failed: {e}")
-            return False
-        
-        finally:
-            self.scraper.close()
-
-    def _authenticate(self) -> bool:
-        """Authenticate with both services - DEPRECATED, now done separately in sync()"""
-        # This method is no longer used - authentication is now done separately in sync()
-        pass
-    
-    def _get_crunchyroll_history(self) -> Optional[Dict[str, Any]]:
-        """Get watch history from Crunchyroll"""
-        # Use pagination by default
-        soup = self.scraper.scrape_history_page(use_pagination=True)
-        
-        if soup:
-            logger.info("✅ Successfully scraped history page with pagination")
-            
-            # Save raw HTML in dev mode
-            if self.dev_mode:
-                try:
-                    html_file = "_cache/scraped_history_page.html"
-                    with open(html_file, 'w', encoding='utf-8') as f:
-                        f.write(str(soup.prettify()))
-                    logger.info(f"📄 Raw HTML saved to {html_file}")
-                except Exception as e:
-                    logger.error(f"Failed to save HTML debug file: {e}")
-            
-            # Parse the HTML to extract history data
-            try:
-                parsed_data = self.history_parser.parse_history_page(soup)
-                if parsed_data:
-                    logger.info(f"📊 Parsed {len(parsed_data.get('items', []))} history items")
-                    return parsed_data
-                else:
-                    logger.warning("No history data could be parsed")
-                    return None
-            except Exception as e:
-                logger.error(f"Failed to parse history data: {e}")
-                return None
-        else:
-            logger.error("❌ Failed to scrape history page")
-            return None
-    
-    def _process_history(self, history_data: Dict[str, Any]) -> int:
-        """Process history data and update AniList"""
-        updates_made = 0
-        processed_items = []
-        failed_items = []
-        
-        items = history_data.get('items', [])
-        if not items:
-            logger.info("No history items found")
-            return 0
-        
-        logger.info(f"Processing {len(items)} history items...")
-        
-        for i, item in enumerate(items, 1):
-            try:
-                logger.debug(f"Processing item {i}/{len(items)}: {item.get('series_title', 'Unknown')}")
-                
-                result = self._process_history_item(item)
-                
-                # Track processing results
-                item_result = {
-                    **item,
-                    'processing_result': 'success' if result else 'failed',
-                    'processed_at': datetime.now().isoformat()
-                }
-                
-                if result:
-                    updates_made += 1
-                    processed_items.append(item_result)
-                    logger.info(f"✅ [{i}/{len(items)}] Updated: {item.get('series_title')} - Episode {item.get('episode_number')}")
-                else:
-                    failed_items.append(item_result)
-                    logger.warning(f"❌ [{i}/{len(items)}] Failed: {item.get('series_title')} - Episode {item.get('episode_number')}")
-                
-                # Add delay to avoid rate limiting
-                if i < len(items):  # Don't delay after the last item
-                    time.sleep(1)
-                
-            except Exception as e:
-                logger.error(f"Failed to process item {i}/{len(items)} {item}: {e}")
-                failed_items.append({
-                    **item,
-                    'processing_result': 'error',
-                    'error': str(e),
-                    'processed_at': datetime.now().isoformat()
-                })
-                continue
-        
-        # Save processing results in dev mode
-        if self.dev_mode:
-            processing_summary = {
-                'total_items': len(items),
-                'successful_updates': len(processed_items),
-                'failed_items': len(failed_items),
-                'success_rate': f"{(len(processed_items) / len(items) * 100):.1f}%" if items else "0%",
-                'processed_items': processed_items,
-                'failed_items': failed_items,
-                'processing_completed_at': datetime.now().isoformat()
-            }
-            
-            self._save_debug_data(processing_summary, "processing_results.json")
-            
-            # Log summary
-            logger.info("📊 Processing Summary:")
-            logger.info(f"  Total items: {processing_summary['total_items']}")
-            logger.info(f"  Successful updates: {processing_summary['successful_updates']}")
-            logger.info(f"  Failed items: {processing_summary['failed_items']}")
-            logger.info(f"  Success rate: {processing_summary['success_rate']}")
-        
-        return updates_made
-    
-    def _process_history_item(self, item: Dict[str, Any]) -> bool:
-        """Process a single history item"""
-        # Extract anime information from the item
-        anime_title = item.get('series_title', '')
-        episode_title = item.get('episode_title', '')
-        episode_number = item.get('episode_number')
-        
-        if not anime_title:
-            logger.debug(f"No anime title found in item: {item}")
-            return False
-        
-        if not episode_number or episode_number <= 0:
-            logger.debug(f"No valid episode number found for {anime_title}: {episode_number}")
-            return False
-        
-        # Check if we've already processed this episode
-        episode_key = f"{anime_title}:{episode_number}"
-        if episode_key in self.cache['processed_episodes']:
-            logger.debug(f"Already processed: {episode_key}")
-            return False
-        
-        # Try to find matching anime in AniList
-        anilist_anime = self._find_anilist_match(anime_title)
-        if not anilist_anime:
-            logger.debug(f"No AniList match found for: {anime_title}")
-            return False
-        
-        # Update progress on AniList
-        if self._update_anilist_progress(anilist_anime, episode_number):
-            self.cache['processed_episodes'].append(episode_key)
-            return True
-        
-        return False
-    
-    def _find_anilist_match(self, anime_title: str) -> Optional[Dict[str, Any]]:
-        """Find matching anime on AniList"""
-        # Check cache first
-        if anime_title in self.cache['anime_mappings']:
-            mapping = self.cache['anime_mappings'][anime_title]
-            if mapping:
-                return mapping
-            else:
-                # Previously failed to match
-                return None
-        
-        # Search on AniList
-        search_results = self.anilist.search_anime(anime_title)
-        if not search_results:
-            # Cache the failed match
-            self.cache['anime_mappings'][anime_title] = None
-            return None
-        
-        # Save search results in dev mode
-        if self.dev_mode:
-            search_debug = {
-                'query': anime_title,
-                'results': search_results,
-                'searched_at': datetime.now().isoformat()
-            }
-            self._save_debug_data(search_debug, f"anilist_search_{anime_title.replace(' ', '_')}.json")
-        
-        # Find best match
-        match_result = self.matcher.find_best_match(anime_title, search_results)
-        if match_result:
-            matched_anime, similarity = match_result
-            # Cache the successful match
-            self.cache['anime_mappings'][anime_title] = matched_anime
-            
-            if self.dev_mode:
-                logger.debug(f"🎯 Matched '{anime_title}' to '{matched_anime.get('title', {}).get('romaji', 'Unknown')}' (similarity: {similarity:.2f})")
-            
-            return matched_anime
-        else:
-            # Cache the failed match
-            self.cache['anime_mappings'][anime_title] = None
-            return None
-    
-    def _update_anilist_progress(self, anime: Dict[str, Any], episode_number: int) -> bool:
-        """Update anime progress on AniList"""
-        media_id = anime['id']
-        
-        # Determine status based on episode number and total episodes
-        total_episodes = anime.get('episodes', 0)
-        status = None
-        
-        if total_episodes and episode_number >= total_episodes:
-            status = 'COMPLETED'
-        elif episode_number == 1:
-            status = 'CURRENT'  # Started watching
-        
-        # Update progress
-        success = self.anilist.update_anime_progress(media_id, episode_number, status)
-        
-        if self.dev_mode and success:
-            logger.debug(f"📺 Updated AniList: {anime.get('title', {}).get('romaji', 'Unknown')} -> Episode {episode_number}" + 
-                        (f" [Status: {status}]" if status else ""))
-        
-        return success
-
-    # ... existing code ...
-
-def sync_watch_history(self, watched_episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Sync Crunchyroll watch history to AniList"""
-    results = {
-        'success': [],
-        'failed': [],
-        'skipped': [],
-        'stats': {'total': 0, 'matched': 0, 'updated': 0}
-    }
-
-    results['stats']['total'] = len(watched_episodes)
-
-    for episode_data in watched_episodes:
-        anime_title = episode_data.get('series_title', '')
-        current_episode = episode_data.get('latest_episode', 0)
-
-        # Find AniList match
-        anilist_anime = self._find_anilist_match(anime_title)
-        if not anilist_anime:
-            results['failed'].append({
-                'title': anime_title,
-                'reason': 'No AniList match found'
-            })
-            continue
-
-        results['stats']['matched'] += 1
-
-        # Determine status and progress
-        total_episodes = anilist_anime.get('episodes') or 999  # Default for ongoing
-        watch_status = self._determine_watch_status(current_episode, total_episodes)
-
-        # Update AniList
-        success = self._update_anilist_entry(
-            anilist_anime['id'],
-            current_episode,
-            watch_status
-        )
-
-        if success:
-            results['success'].append({
-                'title': anime_title,
-                'anilist_title': anilist_anime.get('title', {}).get('romaji', ''),
-                'episodes': f"{current_episode}/{total_episodes}",
-                'status': watch_status
-            })
-            results['stats']['updated'] += 1
-        else:
-            results['failed'].append({
-                'title': anime_title,
-                'reason': 'Failed to update AniList'
-            })
-
-    return results
-
-def _determine_watch_status(self, current_episode: int, total_episodes: int) -> str:
-    """Determine AniList watch status based on progress"""
-    if current_episode == 0:
-        return 'PLANNING'
-    elif current_episode >= total_episodes:
-        return 'COMPLETED'
-    else:
-        return 'CURRENT'
-
-def _update_anilist_entry(self, anime_id: int, progress: int, status: str) -> bool:
-    """Update anime entry on AniList"""
-    try:
-        success = self.anilist.update_anime_status(
-            anime_id=anime_id,
-            status=status,
-            progress=progress
-        )
-
-        if success:
-            logger.info(f"✅ Updated anime {anime_id}: {status} ({progress} episodes)")
-        else:
-            logger.error(f"❌ Failed to update anime {anime_id}")
-
-        return success
-
-    except Exception as e:
-        logger.error(f"❌ Error updating anime {anime_id}: {e}")
-        return False
+            logger.error(f"Error during cleanup: {e}")

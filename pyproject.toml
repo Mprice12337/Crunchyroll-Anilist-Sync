@@ -1,6 +1,6 @@
 [project]
 name = "crunchyroll-anilist-sync"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tool to sync Crunchyroll watch history with AniList progress"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -43,4 +43,4 @@ target-version = ['py39']
 python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = true
+disallow_untyped_defs = false  # Set to false for now since we're not fully typed

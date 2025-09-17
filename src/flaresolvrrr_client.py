@@ -1,27 +1,33 @@
-"""FlareSolverr client for Cloudflare bypass"""
-import time
-import requests
+"""
+Simple FlareSolverr client for Cloudflare bypass
+"""
+
 import logging
+from typing import Dict, Any, Optional, List
+
+import requests
 
 logger = logging.getLogger(__name__)
 
 
 class FlareSolverrClient:
-    """Client for FlareSolverr API"""
+    """Client for FlareSolverr API to bypass Cloudflare protection"""
 
-    def __init__(self, flaresolverr_url):
-        self.flaresolverr_url = flaresolverr_url
+    def __init__(self, flaresolverr_url: str):
+        self.flaresolverr_url = flaresolverr_url.rstrip('/')
         self.session_id = None
 
-    def create_session(self, session_name="crunchyroll_session"):
+    def create_session(self, session_name: str = "crunchyroll_session") -> bool:
         """Create a new FlareSolverr session"""
         try:
-            logger.info(f"Setting up FlareSolverr session at {self.flaresolverr_url}")
-
-            response = requests.post(f"{self.flaresolverr_url}/v1", json={
-                "cmd": "sessions.create",
-                "session": session_name
-            }, timeout=30)
+            response = requests.post(
+                f"{self.flaresolverr_url}/v1",
+                json={
+                    "cmd": "sessions.create",
+                    "session": session_name
+                },
+                timeout=30
+            )
 
             if response.status_code == 200:
                 result = response.json()
@@ -30,54 +36,52 @@ class FlareSolverrClient:
                     logger.info("FlareSolverr session created successfully")
                     return True
                 else:
-                    logger.error(f"Failed to create FlareSolverr session: {result.get('message', 'Unknown error')}")
+                    logger.error(f"Failed to create FlareSolverr session: {result.get('message')}")
             else:
-                logger.error(f"FlareSolverr request failed with status {response.status_code}")
+                logger.error(f"FlareSolverr request failed: {response.status_code}")
 
-        except requests.exceptions.RequestException as e:
+            return False
+
+        except Exception as e:
             logger.error(f"Failed to connect to FlareSolverr: {e}")
+            return False
 
-        return False
-
-    def solve_challenge(self, url, cookies=None, post_data=None):
+    def solve_challenge(self, url: str, cookies: Optional[List[Dict]] = None,
+                        post_data: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
         """Solve Cloudflare challenge for a given URL"""
         try:
-            # Create session if it doesn't exist
             if not self.session_id:
                 if not self.create_session():
-                    logger.error("Failed to create FlareSolverr session")
                     return None
-            
+
             payload = {
                 "cmd": "request.post" if post_data else "request.get",
                 "url": url,
                 "session": self.session_id,
                 "maxTimeout": 60000
             }
-            
+
             if cookies:
                 payload["cookies"] = cookies
-                
+
             if post_data:
                 payload["postData"] = post_data
-                logger.info(f"Sending POST request with data: {list(post_data.keys()) if isinstance(post_data, dict) else 'form data'}")
-            
+
             logger.info(f"Sending FlareSolverr request: {payload['cmd']} {url}")
-            
+
             response = requests.post(
                 f"{self.flaresolverr_url}/v1",
                 json=payload,
                 timeout=70
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
-                
+
                 if result.get("status") == "ok":
                     solution = result.get("solution", {})
                     logger.info("✅ FlareSolverr request successful")
-                    
-                    # Extract more detailed response info
+
                     return {
                         'response': solution.get('response', ''),
                         'cookies': solution.get('cookies', []),
@@ -87,24 +91,29 @@ class FlareSolverrClient:
                         'userAgent': solution.get('userAgent', '')
                     }
                 else:
-                    logger.error(f"FlareSolverr error: {result.get('message', 'Unknown error')}")
-                    return None
+                    logger.error(f"FlareSolverr error: {result.get('message')}")
             else:
-                logger.error(f"FlareSolverr HTTP error: {response.status_code} - {response.text}")
-                return None
-                
+                logger.error(f"FlareSolverr HTTP error: {response.status_code}")
+
+            return None
+
         except Exception as e:
             logger.error(f"FlareSolverr request failed: {e}")
             return None
 
-    def destroy_session(self):
+    def destroy_session(self) -> None:
         """Destroy the FlareSolverr session"""
         if self.session_id:
             try:
-                requests.post(f"{self.flaresolverr_url}/v1", json={
-                    "cmd": "sessions.destroy",
-                    "session": self.session_id
-                }, timeout=10)
+                requests.post(
+                    f"{self.flaresolverr_url}/v1",
+                    json={
+                        "cmd": "sessions.destroy",
+                        "session": self.session_id
+                    },
+                    timeout=10
+                )
                 logger.info("FlareSolverr session destroyed")
-            except:
-                pass  # Ignore cleanup errors
+                self.session_id = None
+            except Exception as e:
+                logger.debug(f"Error destroying FlareSolverr session: {e}")
