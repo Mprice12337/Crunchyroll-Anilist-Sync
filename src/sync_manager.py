@@ -1,5 +1,5 @@
 """
-Enhanced sync manager with better season handling and improved logging
+Enhanced sync manager with improved grouping logic and better logging
 """
 
 import logging
@@ -15,7 +15,7 @@ from cache_manager import CacheManager
 logger = logging.getLogger(__name__)
 
 class SyncManager:
-    """Enhanced sync manager with season support and better progress tracking"""
+    """Enhanced sync manager with improved season handling and progress tracking"""
 
     def __init__(self, **config):
         self.config = config
@@ -133,12 +133,12 @@ class SyncManager:
             return False
 
     def _log_sample_episodes(self) -> None:
-        """Log a sample of episodes for user verification"""
+        """Log a sample of episodes for user verification with improved detail"""
         if not self.watch_history:
             return
 
-        logger.info("📋 Sample of detected episodes:")
-        sample_size = min(5, len(self.watch_history))
+        logger.info("📋 Sample of detected episodes (first 10):")
+        sample_size = min(10, len(self.watch_history))
 
         for i, episode in enumerate(self.watch_history[:sample_size]):
             series_title = episode.get('series_title', 'Unknown')
@@ -146,13 +146,13 @@ class SyncManager:
             season = episode.get('season', 1)
             source = episode.get('source', 'unknown')
 
-            logger.info(f"  {i+1}. {series_title} - Episode {episode_number} (Season {season}) [{source}]")
+            logger.info(f"  {i+1:2d}. {series_title} - S{season} E{episode_number}")
 
         if len(self.watch_history) > sample_size:
             logger.info(f"  ... and {len(self.watch_history) - sample_size} more episodes")
 
     def _update_anilist_progress_with_seasons(self) -> bool:
-        """Enhanced progress update with season awareness"""
+        """Enhanced progress update with season awareness and improved logging"""
         logger.info("🎯 Updating AniList progress with season awareness...")
 
         if not self.watch_history:
@@ -160,13 +160,13 @@ class SyncManager:
             return True
 
         # Group episodes by series and season to get latest progress
-        series_progress = self._group_episodes_by_series_and_season(self.watch_history)
+        series_progress = self._group_episodes_by_series_and_season_improved(self.watch_history)
 
         logger.info(f"Processing {len(series_progress)} unique series-season combinations...")
 
         for i, ((series_title, season), latest_episode) in enumerate(series_progress.items(), 1):
             try:
-                logger.info(f"[{i}/{len(series_progress)}] Processing: {series_title} (Season {season})")
+                logger.info(f"[{i}/{len(series_progress)}] Processing: {series_title} (Season {season}) - Episode {latest_episode}")
 
                 if self._update_series_season_progress(series_title, season, latest_episode):
                     self.sync_results['successful_updates'] += 1
@@ -183,18 +183,31 @@ class SyncManager:
 
         return True
 
-    def _group_episodes_by_series_and_season(self, episodes: List[Dict]) -> Dict[tuple, int]:
-        """Group episodes by series and season, finding the latest episode for each"""
+    def _group_episodes_by_series_and_season_improved(self, episodes: List[Dict]) -> Dict[tuple, int]:
+        """Group episodes by series and season with improved logging and validation"""
         series_season_progress = {}
+        processed_count = 0
+        skipped_count = 0
 
+        logger.info("🗂️ Grouping episodes by series and season...")
+
+        # First, let's see what we have
         for episode in episodes:
-            series_title = episode.get('series_title')
-            episode_number = episode.get('episode_number')
+            series_title = episode.get('series_title', '').strip()
+            episode_number = episode.get('episode_number', 0)
             season = episode.get('season', 1)
 
-            if not series_title or not episode_number:
-                self.sync_results['skipped_episodes'] += 1
+            if not series_title:
+                logger.debug(f"Skipping episode - no series title: {episode}")
+                skipped_count += 1
                 continue
+
+            if not episode_number or episode_number <= 0:
+                logger.debug(f"Skipping episode - no/invalid episode number: {series_title} - {episode}")
+                skipped_count += 1
+                continue
+
+            processed_count += 1
 
             # Create key for series-season combination
             key = (series_title, season)
@@ -202,23 +215,38 @@ class SyncManager:
             # Keep track of the highest episode number for each series-season
             if key not in series_season_progress:
                 series_season_progress[key] = episode_number
+                logger.debug(f"New series-season: {series_title} S{season} E{episode_number}")
             else:
-                series_season_progress[key] = max(series_season_progress[key], episode_number)
+                old_episode = series_season_progress[key]
+                if episode_number > old_episode:
+                    series_season_progress[key] = episode_number
+                    logger.debug(f"Updated progress: {series_title} S{season} E{old_episode} -> E{episode_number}")
 
         self.sync_results['total_episodes'] = len(episodes)
+        self.sync_results['skipped_episodes'] = skipped_count
 
-        logger.info(f"Grouped into {len(series_season_progress)} series-season combinations")
+        logger.info(f"✅ Processed {processed_count} episodes, skipped {skipped_count}")
+        logger.info(f"📊 Found {len(series_season_progress)} unique series-season combinations:")
+
+        # Log all series-seasons for transparency
+        for i, ((series, season), episode) in enumerate(sorted(series_season_progress.items()), 1):
+            logger.info(f"  {i:2d}. {series} (Season {season}) - Latest: Episode {episode}")
+
         return series_season_progress
 
     def _update_series_season_progress(self, series_title: str, season: int, episode_number: int) -> bool:
-        """Update progress for a specific series and season on AniList"""
+        """Update progress for a specific series and season on AniList with enhanced logging"""
         try:
+            logger.info(f"🔍 Searching AniList for: {series_title} (Season {season})")
+
             # Search for anime on AniList
             search_results = self.anilist_client.search_anime(series_title)
             if not search_results:
-                logger.warning(f"No AniList results found for: {series_title}")
+                logger.warning(f"❌ No AniList results found for: {series_title}")
                 self.sync_results['no_matches_found'] += 1
                 return False
+
+            logger.info(f"📚 Found {len(search_results)} AniList results for matching")
 
             # Enhanced matching with season awareness
             match_result = self.anime_matcher.find_best_match_with_season(
@@ -226,7 +254,7 @@ class SyncManager:
             )
 
             if not match_result:
-                logger.warning(f"No suitable match found for: {series_title} (Season {season})")
+                logger.warning(f"❌ No suitable match found for: {series_title} (Season {season})")
                 self.sync_results['no_matches_found'] += 1
                 return False
 
@@ -238,23 +266,28 @@ class SyncManager:
             # Check if season matches
             if matched_season == season:
                 self.sync_results['season_matches'] += 1
-                logger.info(f"✅ Season match: {anime_title} Season {matched_season} (similarity: {similarity:.2f})")
+                logger.info(f"✅ Perfect season match: {anime_title} Season {matched_season} (similarity: {similarity:.2f})")
             else:
                 self.sync_results['season_mismatches'] += 1
-                logger.warning(f"⚠️ Season mismatch: Found Season {matched_season}, expected Season {season}")
+                logger.warning(f"⚠️ Season mismatch: Expected S{season}, matched S{matched_season} for {anime_title}")
 
             # Determine status based on episode count
             status = None
             if total_episodes and episode_number >= total_episodes:
                 status = 'COMPLETED'
-                logger.info(f"🏁 Marking as completed ({episode_number}/{total_episodes})")
+                logger.info(f"🏁 Will mark as completed ({episode_number}/{total_episodes})")
+            else:
+                logger.info(f"📈 Will update progress to {episode_number}/{total_episodes or '?'}")
 
             # Dry run check
             if self.config.get('dry_run'):
                 logger.info(f"[DRY RUN] Would update {anime_title} Season {matched_season} to episode {episode_number}")
+                if status:
+                    logger.info(f"[DRY RUN] Would mark as {status}")
                 return True
 
             # Update progress
+            logger.info(f"🔄 Updating AniList progress for: {anime_title}")
             success = self.anilist_client.update_anime_progress(
                 anime_id=anime_id,
                 progress=episode_number,
@@ -262,7 +295,7 @@ class SyncManager:
             )
 
             if success:
-                logger.info(f"✅ Updated {anime_title} Season {matched_season} to episode {episode_number}")
+                logger.info(f"✅ Successfully updated {anime_title} Season {matched_season} to episode {episode_number}")
 
                 # Cache successful mapping
                 self.cache_manager.save_anime_mapping(series_title, {
@@ -274,18 +307,20 @@ class SyncManager:
 
                 return True
             else:
-                logger.error(f"❌ Failed to update {anime_title}")
+                logger.error(f"❌ Failed to update {anime_title} on AniList")
                 return False
 
         except Exception as e:
-            logger.error(f"Error updating {series_title} Season {season}: {e}")
+            logger.error(f"❌ Error updating {series_title} Season {season}: {e}", exc_info=True)
             return False
 
     def _report_enhanced_results(self) -> None:
         """Report enhanced sync results with season information"""
         results = self.sync_results
 
+        logger.info("=" * 60)
         logger.info("📊 Enhanced Sync Results:")
+        logger.info("=" * 60)
         logger.info(f"  📺 Total episodes found: {results['total_episodes']}")
         logger.info(f"  ✅ Successful updates: {results['successful_updates']}")
         logger.info(f"  ❌ Failed updates: {results['failed_updates']}")
@@ -304,7 +339,12 @@ class SyncManager:
             season_accuracy = (results['season_matches'] / total_season_attempts) * 100
             logger.info(f"  🎭 Season accuracy: {season_accuracy:.1f}%")
 
+        logger.info("=" * 60)
+
         # Provide actionable feedback
+        if results['skipped_episodes'] > 0:
+            logger.info("💡 Tip: Skipped episodes may be movies, specials, or episodes without clear numbering")
+
         if results['season_mismatches'] > 0:
             logger.info("💡 Tip: Season mismatches may occur when anime titles don't clearly indicate seasons")
 
@@ -336,6 +376,7 @@ class SyncManager:
                         'series_title': item.get('series_title', 'Unknown'),
                         'episode_number': item.get('episode_number', 'Unknown'),
                         'season': item.get('season', 1),
+                        'episode_title': item.get('episode_title', ''),
                         'source': item.get('source', 'unknown')
                     })
 

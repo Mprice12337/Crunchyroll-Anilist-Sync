@@ -1,5 +1,5 @@
 """
-Fixed Crunchyroll scraper with working parser logic and NO HTML logging
+Fixed Crunchyroll scraper with improved season/episode parsing and better logging
 """
 
 import re
@@ -20,7 +20,7 @@ from cache_manager import AuthCache
 logger = logging.getLogger(__name__)
 
 class CrunchyrollScraper:
-    """Fixed Crunchyroll scraper with working parser and no HTML logging"""
+    """Fixed Crunchyroll scraper with improved parsing and logging"""
 
     def __init__(self, email: str, password: str, headless: bool = True,
                  flaresolverr_url: Optional[str] = None):
@@ -32,9 +32,15 @@ class CrunchyrollScraper:
         self.auth_cache = AuthCache()
         self.is_authenticated = False
 
-        # Working episode and season patterns
-        self.episode_pattern = re.compile(r'(?:E|Episode|ep\.?|e)\s*(\d+)', re.IGNORECASE)
-        self.season_pattern = re.compile(r'season\s*(\d+)', re.IGNORECASE)
+        # Enhanced patterns for better parsing
+        self.episode_pattern = re.compile(r'(?:S\d+\s+)?(?:E|Episode|ep\.?)\s*(\d+)', re.IGNORECASE)
+        self.season_pattern = re.compile(r'(?:S|Season)\s*(\d+)', re.IGNORECASE)
+
+        # More comprehensive patterns for different formats
+        self.combined_pattern = re.compile(r'S(\d+)\s+E(\d+)', re.IGNORECASE)  # S2 E20
+        self.episode_only_pattern = re.compile(r'\bE(\d+)\b', re.IGNORECASE)  # E20
+
+        self.episode_converter = EpisodeNumberConverter()
 
     def authenticate(self) -> bool:
         """Authenticate with Crunchyroll"""
@@ -72,8 +78,8 @@ class CrunchyrollScraper:
         return False
 
     def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
-        """Get watch history with working parser logic"""
-        logger.info(f"📚 Scraping watch history (max {max_pages} pages)...")
+        """Get watch history with improved parsing logic"""
+        logger.info(f"📚 Scraping watch history (max {max_pages} pages = {max_pages * 2} scrolls)...")
 
         if not self.is_authenticated:
             logger.error("Not authenticated! Call authenticate() first.")
@@ -99,11 +105,11 @@ class CrunchyrollScraper:
         # Save initial page
         self._save_debug_html("history_page_loaded.html")
 
-        # Scrape with working logic
-        return self._scrape_with_working_parser(max_pages)
+        # Scrape with improved logic
+        return self._scrape_with_improved_parser(max_pages)
 
-    def _scrape_with_working_parser(self, max_pages: int) -> List[Dict[str, Any]]:
-        """Scrape using the working parser logic"""
+    def _scrape_with_improved_parser(self, max_pages: int) -> List[Dict[str, Any]]:
+        """Scrape using improved parser logic with better logging"""
         all_episodes = []
 
         try:
@@ -111,19 +117,21 @@ class CrunchyrollScraper:
             scroll_attempts = 0
             max_scrolls = max_pages * 2
 
-            logger.info(f"🔄 Starting scraping (max {max_scrolls} scrolls)")
+            logger.info(f"🔄 Starting scraping (max {max_scrolls} scrolls for {max_pages} pages)")
 
             while scroll_attempts < max_scrolls:
                 # Scroll to bottom
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(3)
 
-                # Parse current episodes using working logic
-                current_episodes = self._parse_with_working_logic()
+                # Parse current episodes using improved logic
+                current_episodes = self._parse_with_improved_logic()
+
+                logger.info(f"📺 Scroll {scroll_attempts + 1}: Found {len(current_episodes)} total episodes")
 
                 # Check if we got new episodes
                 if len(current_episodes) > last_count:
-                    logger.info(f"📺 Found {len(current_episodes)} total episodes (scroll {scroll_attempts + 1})")
+                    logger.info(f"✅ New episodes found: {len(current_episodes) - last_count}")
                     last_count = len(current_episodes)
                     all_episodes = current_episodes
                 else:
@@ -133,37 +141,52 @@ class CrunchyrollScraper:
                 scroll_attempts += 1
                 time.sleep(1)
 
+            # Log final results with more detail
+            unique_series = set()
+            for episode in all_episodes:
+                series = episode.get('series_title', 'Unknown')
+                season = episode.get('season', 1)
+                unique_series.add(f"{series} (Season {season})")
+
             logger.info(f"✅ Scraping complete: {len(all_episodes)} total episodes")
+            logger.info(f"📚 Unique series-seasons found: {len(unique_series)}")
+
+            # Log first few unique series for verification
+            for i, series_season in enumerate(sorted(list(unique_series))[:5], 1):
+                logger.info(f"  {i}. {series_season}")
+            if len(unique_series) > 5:
+                logger.info(f"  ... and {len(unique_series) - 5} more series-seasons")
+
             return all_episodes
 
         except Exception as e:
             logger.error(f"Error during scraping: {e}")
             return all_episodes
 
-    def _parse_with_working_logic(self) -> List[Dict[str, Any]]:
-        """Parse using working Crunchyroll-specific logic"""
+    def _parse_with_improved_logic(self) -> List[Dict[str, Any]]:
+        """Parse using improved Crunchyroll-specific logic with better logging"""
         try:
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
             history_items = []
 
-            # Use the working Crunchyroll history card parsing
-            cards_items = self._parse_crunchyroll_history_cards(soup)
+            # Use improved Crunchyroll history card parsing
+            cards_items = self._parse_crunchyroll_history_cards_improved(soup)
             if cards_items:
                 history_items.extend(cards_items)
 
             # Convert to expected format and remove duplicates
             unique_items = self._remove_duplicates(history_items)
-            episodes = self._convert_to_episodes(unique_items)
+            episodes = self._convert_to_episodes_improved(unique_items)
 
-            logger.info(f"✅ Parsed {len(episodes)} unique episodes")
+            logger.info(f"✅ Parsed {len(episodes)} unique episodes from {len(cards_items)} raw items")
             return episodes
 
         except Exception as e:
-            logger.error(f"Error in working parser: {e}")
+            logger.error(f"Error in improved parser: {e}")
             return []
 
-    def _parse_crunchyroll_history_cards(self, soup) -> List[Dict[str, Any]]:
-        """Parse Crunchyroll history cards using working logic"""
+    def _parse_crunchyroll_history_cards_improved(self, soup) -> List[Dict[str, Any]]:
+        """Parse Crunchyroll history cards with improved logic and logging"""
         history_items = []
 
         try:
@@ -178,27 +201,40 @@ class CrunchyrollScraper:
 
             for i, card in enumerate(cards):
                 try:
-                    item = self._extract_from_history_card(card)
+                    item = self._extract_from_history_card_improved(card)
                     if item and item.get('series_title'):
                         history_items.append(item)
-                        logger.debug(f"Card {i+1}: {item['series_title']} - {item.get('episode_title', 'No episode title')}")
+                        # More detailed debug logging
+                        series = item.get('series_title', 'Unknown')
+                        episode_title = item.get('episode_title', 'No episode title')
+                        season = item.get('season', 1)
+                        raw_text = item.get('raw_text', '')
+
+                        logger.debug(f"Card {i+1}: {series} S{season} - {episode_title}")
+                        if raw_text:
+                            logger.debug(f"  Raw text: {raw_text[:100]}...")
+                    else:
+                        logger.debug(f"Card {i+1}: Skipped - no valid data extracted")
                 except Exception as e:
                     logger.debug(f"Error parsing card {i + 1}: {e}")
                     continue
 
-            logger.info(f"Extracted {len(history_items)} items from history cards")
+            logger.info(f"Extracted {len(history_items)} valid items from {len(cards)} cards")
 
         except Exception as e:
             logger.error(f"Error parsing history cards: {e}")
 
         return history_items
 
-    def _extract_from_history_card(self, card) -> Optional[Dict[str, Any]]:
-        """Extract data from a single history card using working logic"""
+    def _extract_from_history_card_improved(self, card) -> Optional[Dict[str, Any]]:
+        """Extract data from a single history card with improved season/episode parsing"""
         if not card:
             return None
 
         try:
+            # Get all text from the card for analysis
+            all_text = card.get_text(strip=True)
+
             # Extract series title from series link
             series_title = ""
             series_link = card.select_one('a[href*="/series/"]')
@@ -219,11 +255,21 @@ class CrunchyrollScraper:
 
             # Clean up series title
             if series_title:
-                series_title = self._clean_series_title(series_title)
+                series_title = self._clean_series_title_improved(series_title)
 
-            # Extract season from context
-            all_text = card.get_text()
-            season_number = self._extract_season_from_text(all_text)
+            # Extract season and episode with improved patterns
+            season_number, episode_number = self._extract_season_episode_improved(all_text, episode_title)
+
+            # NEW: Convert absolute episode numbers to per-season if needed
+            if series_title and episode_number > 0:
+                original_episode = episode_number
+                episode_number = self.episode_converter.convert_episode_number(
+                    series_title, season_number, episode_number, logger
+                )
+
+                if episode_number != original_episode:
+                    logger.debug(
+                        f"Episode conversion: {series_title} S{season_number} E{original_episode}→E{episode_number}")
 
             # Get URLs
             series_url = ""
@@ -240,8 +286,10 @@ class CrunchyrollScraper:
                     'series_title': series_title,
                     'episode_title': episode_title,
                     'season': season_number,
+                    'episode_number': episode_number,
                     'series_url': series_url,
                     'episode_url': episode_url,
+                    'raw_text': all_text,  # Keep for debugging
                     'timestamp': None
                 }
 
@@ -250,24 +298,60 @@ class CrunchyrollScraper:
 
         return None
 
-    def _clean_series_title(self, title: str) -> str:
-        """Clean series title using working logic"""
+    def _extract_season_episode_improved(self, all_text: str, episode_title: str) -> tuple[int, int]:
+        """Extract season and episode numbers with improved pattern matching"""
+        season_number = 1
+        episode_number = 0
+
+        # Combine both texts for analysis
+        combined_text = f"{all_text} {episode_title}"
+
+        logger.debug(f"Analyzing text for season/episode: '{combined_text[:100]}...'")
+
+        # Try combined pattern first (S2 E20)
+        combined_match = self.combined_pattern.search(combined_text)
+        if combined_match:
+            season_number = int(combined_match.group(1))
+            episode_number = int(combined_match.group(2))
+            logger.debug(f"Combined pattern match: S{season_number} E{episode_number}")
+            return season_number, episode_number
+
+        # Try season pattern (S2 or Season 2)
+        season_match = self.season_pattern.search(combined_text)
+        if season_match:
+            season_number = int(season_match.group(1))
+            logger.debug(f"Season pattern match: S{season_number}")
+
+        # Try episode pattern (E20)
+        episode_match = self.episode_only_pattern.search(combined_text)
+        if episode_match:
+            episode_number = int(episode_match.group(1))
+            logger.debug(f"Episode pattern match: E{episode_number}")
+
+        logger.debug(f"Final result: S{season_number} E{episode_number}")
+        return season_number, episode_number
+
+    def _clean_series_title_improved(self, title: str) -> str:
+        """Clean series title with improved logic"""
         if not title:
             return ""
 
         cleaned = title.strip()
 
-        # Remove episode information
-        cleaned = re.sub(r'\s*E\d+.*$', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s*Episode\s*\d+.*$', '', cleaned, flags=re.IGNORECASE)
+        # Remove season/episode information that might be in the title
+        patterns_to_remove = [
+            r'\s*S\d+\s+E\d+.*$',  # S2 E20 and everything after
+            r'\s*E\d+.*$',         # E20 and everything after
+            r'\s*Episode\s*\d+.*$', # Episode 20 and everything after
+            r'\s*Season\s+\d+.*$',  # Season 2 and everything after
+        ]
+
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
 
         # Remove date information
         cleaned = re.sub(r'\s*\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago.*$', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\s*\d{1,2}/\d{1,2}/\d{4}.*$', '', cleaned)
-
-        # Remove season from title if redundant
-        cleaned = re.sub(r'\s+Season\s+\d+', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s+S\d+', '', cleaned)
 
         # Remove year indicators
         cleaned = re.sub(r'\s+\(\d{4}\)', '', cleaned)
@@ -280,19 +364,58 @@ class CrunchyrollScraper:
 
         return cleaned
 
-    def _extract_season_from_text(self, text: str) -> int:
-        """Extract season number from text"""
+    def _convert_to_episodes_improved(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert items to episode format with improved validation and logging"""
+        episodes = []
+        skipped_count = 0
+
+        for item in items:
+            series_title = item.get('series_title', '')
+            episode_title = item.get('episode_title', '')
+            episode_number = item.get('episode_number', 0)
+            season = item.get('season', 1)
+
+            if not series_title:
+                logger.debug(f"Skipping item - no series title: {item}")
+                skipped_count += 1
+                continue
+
+            # Skip if no episode number was detected
+            if episode_number <= 0:
+                # Check if it's a movie/special
+                if self._is_movie_or_special(episode_title):
+                    logger.debug(f"Skipping movie/special: {series_title} - {episode_title}")
+                    skipped_count += 1
+                    continue
+                else:
+                    logger.warning(f"No episode number found for: {series_title} - {episode_title}")
+                    skipped_count += 1
+                    continue
+
+            episodes.append({
+                'series_title': series_title,
+                'episode_title': episode_title,
+                'episode_number': episode_number,
+                'season': season,
+                'series_url': item.get('series_url', ''),
+                'episode_url': item.get('episode_url', '')
+            })
+
+        logger.info(f"Converted {len(episodes)} valid episodes, skipped {skipped_count} items")
+        return episodes
+
+    def _is_movie_or_special(self, text: str) -> bool:
+        """Check if content is movie/special"""
         if not text:
-            return 1
+            return False
 
-        season_match = self.season_pattern.search(text)
-        if season_match:
-            try:
-                return int(season_match.group(1))
-            except ValueError:
-                pass
+        movie_indicators = [
+            'movie', 'film', 'compilation', 'special', 'ova', 'ona',
+            'recap', 'summary', 'theater', 'theatrical'
+        ]
 
-        return 1
+        text_lower = text.lower()
+        return any(indicator in text_lower for indicator in movie_indicators)
 
     def _normalize_url(self, url: str) -> str:
         """Normalize URL to full format"""
@@ -316,73 +439,19 @@ class CrunchyrollScraper:
                 continue
 
             series_title = item.get('series_title', '').strip()
-            episode_title = item.get('episode_title', '').strip()
-            identifier = f"{series_title}|{episode_title}"
+            episode_number = item.get('episode_number', 0)
+            season = item.get('season', 1)
+
+            # Create identifier based on series, season, episode
+            identifier = f"{series_title}|S{season}|E{episode_number}"
 
             if identifier not in seen and series_title:
                 seen.add(identifier)
                 unique_items.append(item)
 
+        logger.info(f"Removed {len(items) - len(unique_items)} duplicates, kept {len(unique_items)} unique items")
         return unique_items
 
-    def _convert_to_episodes(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Convert items to episode format with episode numbers"""
-        episodes = []
-
-        for item in items:
-            series_title = item.get('series_title', '')
-            episode_title = item.get('episode_title', '')
-
-            if not series_title:
-                continue
-
-            # Extract episode number
-            episode_number = self._extract_episode_number(episode_title)
-
-            if episode_number > 0:
-                episodes.append({
-                    'series_title': series_title,
-                    'episode_title': episode_title,
-                    'episode_number': episode_number,
-                    'season': item.get('season', 1),
-                    'series_url': item.get('series_url', ''),
-                    'episode_url': item.get('episode_url', '')
-                })
-
-        return episodes
-
-    def _extract_episode_number(self, episode_text: str) -> int:
-        """Extract episode number using working logic"""
-        if not episode_text:
-            return 0
-
-        # Skip movies/specials
-        if self._is_movie_or_special(episode_text):
-            return 0
-
-        episode_match = self.episode_pattern.search(episode_text)
-        if episode_match:
-            try:
-                return int(episode_match.group(1))
-            except ValueError:
-                pass
-
-        return 0
-
-    def _is_movie_or_special(self, text: str) -> bool:
-        """Check if content is movie/special"""
-        if not text:
-            return False
-
-        movie_indicators = [
-            'movie', 'film', 'compilation', 'special', 'ova', 'ona',
-            'recap', 'summary', 'theater', 'theatrical'
-        ]
-
-        text_lower = text.lower()
-        return any(indicator in text_lower for indicator in movie_indicators)
-
-    # Authentication methods (keep existing logic)
     def _try_cached_auth(self) -> bool:
         """Try to use cached authentication"""
         cached_auth = self.auth_cache.load_crunchyroll_auth()
@@ -736,3 +805,99 @@ class CrunchyrollScraper:
                 logger.debug("Browser closed")
             except Exception as e:
                 logger.error(f"Error closing browser: {e}")
+
+class EpisodeNumberConverter:
+    """Convert absolute episode numbers to per-season episode numbers"""
+
+    def __init__(self):
+        # Common anime season lengths - most anime have 12-13 episodes per season
+        self.typical_season_lengths = {
+            1: 12,  # Default for season 1
+            2: 12,  # Default for season 2
+            3: 12,  # Default for season 3
+            4: 12,  # Default for season 4+
+        }
+
+        # Known anime with non-standard season lengths
+        self.known_season_lengths = {
+            "The Rising of the Shield Hero": {1: 25, 2: 13, 3: 12, 4: 12},
+            "DAN DA DAN": {1: 12, 2: 12},
+            "Dandadan": {1: 12, 2: 12},
+            "Kaiju No. 8": {1: 12, 2: 12},
+            "Tower of God": {1: 13, 2: 13},
+            "That Time I Got Reincarnated as a Slime": {1: 24, 2: 24, 3: 24}
+        }
+
+    def convert_episode_number(self, series_title: str, season: int, episode_number: int,
+                               logger) -> int:
+        """Convert absolute episode number to per-season episode number if needed"""
+
+        # If it's season 1, episode number should be correct as-is
+        if season == 1:
+            return episode_number
+
+        # Check if this looks like an absolute episode number
+        if self._looks_like_absolute_episode(series_title, season, episode_number):
+            converted = self._convert_absolute_to_per_season(series_title, season, episode_number,
+                                                             logger)
+            if converted != episode_number:
+                logger.info(
+                    f"🔄 Converted {series_title} S{season} E{episode_number} → E{converted} (absolute→per-season)")
+            return converted
+
+        # Episode number looks reasonable for the season, return as-is
+        return episode_number
+
+    def _looks_like_absolute_episode(self, series_title: str, season: int, episode_number: int) -> bool:
+        """Determine if episode number looks like an absolute number vs per-season"""
+
+        # For season 1, it's always per-season
+        if season == 1:
+            return False
+
+        # If episode number is very high for later seasons, likely absolute
+        # Most anime seasons are 12-13 episodes, so E20+ in S2+ is suspicious
+        if season >= 2 and episode_number > 15:
+            return True
+
+        # For known long-running shows in later seasons
+        if season >= 3 and episode_number > 20:
+            return True
+
+        return False
+
+    def _convert_absolute_to_per_season(self, series_title: str, season: int, absolute_episode: int,
+                                        logger) -> int:
+        """Convert absolute episode number to per-season episode number"""
+
+        # Get season lengths for this series
+        if series_title in self.known_season_lengths:
+            season_lengths = self.known_season_lengths[series_title]
+        else:
+            # Use typical lengths
+            season_lengths = self.typical_season_lengths
+
+        # Calculate episodes before this season
+        episodes_before = 0
+        for s in range(1, season):
+            if s in season_lengths:
+                episodes_before += season_lengths[s]
+            else:
+                episodes_before += self.typical_season_lengths.get(s, 12)
+
+        # Convert absolute to per-season
+        per_season_episode = absolute_episode - episodes_before
+
+        # Sanity check - if result is <= 0, something went wrong
+        if per_season_episode <= 0:
+            logger.warning(
+                f"⚠️ Episode conversion resulted in {per_season_episode} for {series_title} S{season} E{absolute_episode}")
+            return absolute_episode  # Return original if conversion failed
+
+        # Sanity check - if result is way too high, might not be absolute
+        expected_season_length = season_lengths.get(season, 12)
+        if per_season_episode > expected_season_length + 5:  # Allow some flexibility
+            logger.debug(
+                f"🤔 Converted episode {per_season_episode} seems high for {series_title} S{season} (expected ~{expected_season_length})")
+
+        return per_season_episode

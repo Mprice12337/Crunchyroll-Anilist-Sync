@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for Crunchyroll-AniList Sync with clean logging
+Main entry point for Crunchyroll-AniList Sync with clean logging and fixed imports
 """
 
 import os
@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from dotenv import load_dotenv
-from src.sync_manager import SyncManager
+# Fixed import - no src prefix needed since we added src to path
+from sync_manager import SyncManager
 
 # Load environment variables
 load_dotenv()
@@ -45,12 +46,9 @@ def setup_logging(debug: bool = False) -> None:
 
     # Keep our application debug logs but suppress third-party noise
     if debug:
-        logging.getLogger('src').setLevel(logging.DEBUG)
-        logging.getLogger('crunchyroll_scraper').setLevel(logging.DEBUG)
-        logging.getLogger('anilist_client').setLevel(logging.DEBUG)
-        logging.getLogger('anime_matcher').setLevel(logging.DEBUG)
-        logging.getLogger('sync_manager').setLevel(logging.DEBUG)
-        logging.getLogger('__main__').setLevel(logging.DEBUG)
+        # Set debug level for our modules
+        for module in ['sync_manager', 'crunchyroll_scraper', 'anilist_client', 'anime_matcher', '__main__']:
+            logging.getLogger(module).setLevel(logging.DEBUG)
 
         # But keep Selenium quiet even in debug mode
         logging.getLogger('selenium').setLevel(logging.INFO)
@@ -125,8 +123,11 @@ def main() -> int:
             'headless': not args.no_headless,
             'max_pages': args.max_pages,
             'dry_run': args.dry_run,
-            'clear_cache': args.clear_cache
+            'clear_cache': args.clear_cache,
+            'debug': args.debug  # Pass debug flag to components
         }
+
+        logger.info(f"Configuration: max_pages={config['max_pages']}, headless={config['headless']}, dry_run={config['dry_run']}")
 
         # Initialize and run sync manager
         sync_manager = SyncManager(**config)
