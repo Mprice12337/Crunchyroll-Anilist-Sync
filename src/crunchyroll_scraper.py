@@ -185,113 +185,147 @@ class CrunchyrollScraper:
             return all_episodes
 
     def _get_account_id_from_token_endpoint(self) -> Optional[str]:
-        """Get account ID from token endpoint using correct POST method"""
+        """Get account ID from token endpoint using browser's JavaScript context"""
         try:
-            # Get cookies and other data from browser
-            cookies = {cookie['name']: cookie['value'] for cookie in self.driver.get_cookies()}
+            logger.info("Getting account ID via browser JavaScript...")
 
-            # Try to extract device_id and etp-anonymous-id from browser
+            # Extract device_id from browser first
             device_id = self._get_device_id()
-            etp_anonymous_id = self._get_etp_anonymous_id()
-
             if not device_id:
                 logger.warning("Could not extract device_id, generating one...")
                 import uuid
                 device_id = str(uuid.uuid4())
 
-            # Set up headers exactly like the browser request
-            headers = {
-                'accept': 'application/json, text/plain, */*',
-                'accept-language': 'en-US,en;q=0.9',
-                'authorization': 'Basic bm9haWhkZXZtXzZpeWcwYThsMHE6',  # From your example
-                'content-type': 'application/x-www-form-urlencoded',
-                'sec-fetch-dest': 'empty',
-                'sec-fetch-mode': 'cors',
-                'sec-fetch-site': 'same-origin',
-                'user-agent': self.driver.execute_script("return navigator.userAgent;"),
-                'referer': 'https://www.crunchyroll.com/discover'
-            }
+            # Execute the token request directly in the browser using JavaScript
+            logger.debug(f"Making token request with device_id: {device_id[:8]}...")
 
-            # Add etp-anonymous-id if we found it
-            if etp_anonymous_id:
-                headers['etp-anonymous-id'] = etp_anonymous_id
+            token_response = self.driver.execute_script("""
+                const deviceId = arguments[0];
 
-            # Set up request body exactly like the browser
-            body_data = {
-                'device_id': device_id,
-                'device_type': 'Chrome on macOS',  # Could detect this dynamically
-                'grant_type': 'etp_rt_cookie'
-            }
+                // Make the exact same request the browser would make
+                return fetch("https://www.crunchyroll.com/auth/v1/token", {
+                    method: "POST",
+                    headers: {
+                        "accept": "*/*",
+                        "accept-language": "en-US,en;q=0.9",
+                        "authorization": "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "priority": "u=1, i",
+                        "sec-ch-ua": '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": '"macOS"',
+                        "sec-fetch-dest": "empty",
+                        "sec-fetch-mode": "cors",
+                        "sec-fetch-site": "same-origin"
+                    },
+                    referrer: "https://www.crunchyroll.com/history",
+                    body: `device_id=${deviceId}&device_type=Chrome&grant_type=etp_rt_cookie`,
+                    mode: "cors",
+                    credentials: "include"
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return {
+                            success: false,
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: Object.fromEntries(response.headers.entries())
+                        };
+                    }
+                    return response.json().then(data => ({
+                        success: true,
+                        status: response.status,
+                        data: data
+                    }));
+                })
+                .catch(error => ({
+                    success: false,
+                    error: error.message
+                }));
+            """, device_id)
 
-            import requests
+            logger.debug(f"Token request completed")
 
-            # Make POST request to token endpoint
-            response = requests.post(
-                'https://www.crunchyroll.com/auth/v1/token',
-                headers=headers,
-                cookies=cookies,
-                data=body_data,  # Use data= for form-encoded body
-                timeout=30
-            )
-
-            logger.debug(f"Token endpoint response: {response.status_code}")
-
-            if response.status_code == 200:
-                token_data = response.json()
-                account_id = token_data.get('account_id')
-
-                if account_id:
-                    # Store access token for API calls
-                    self.access_token = token_data.get('access_token')
-                    logger.info(f"✅ Got account ID: {account_id[:8]}...")
-                    return account_id
-                else:
-                    logger.error("Token response missing account_id")
-                    logger.debug(f"Response keys: {list(token_data.keys())}")
-                    return None
-            elif response.status_code == 403:
-                logger.error("Token endpoint returned 403 - may need different auth approach")
-                logger.debug("Try refreshing browser session or checking if logged in properly")
+            # Handle the response
+            if not token_response:
+                logger.error("No response from browser token request")
                 return None
-            elif response.status_code == 401:
-                logger.error("Token endpoint returned 401 - authentication issue")
+
+            if not token_response.get('success'):
+                status = token_response.get('status', 'unknown')
+                error_msg = token_response.get('error', token_response.get('statusText', 'unknown error'))
+                logger.error(f"Browser token request failed: {status} - {error_msg}")
+
+                # Log additional debug info for non-200 responses
+                if 'headers' in token_response:
+                    logger.debug(f"Response headers: {token_response['headers']}")
+
                 return None
+
+            # Extract account_id from successful response
+            data = token_response.get('data', {})
+            account_id = data.get('account_id')
+
+            if account_id:
+                # Store access token for API calls
+                self.access_token = data.get('access_token')
+                logger.info(f"✅ Got account ID via browser: {account_id[:8]}...")
+                return account_id
             else:
-                logger.error(f"Token endpoint failed: {response.status_code}")
-                logger.debug(f"Response: {response.text[:200]}")
+                logger.error("Token response missing account_id")
+                logger.debug(f"Response data keys: {list(data.keys()) if data else 'None'}")
                 return None
 
         except Exception as e:
-            logger.error(f"Token endpoint error: {e}")
+            logger.error(f"Browser token request error: {e}")
             return None
 
     def _get_device_id(self) -> Optional[str]:
-        """Extract device_id from browser context"""
+        """Extract device_id from browser context with enhanced methods"""
         try:
-            # Try to get device_id from JavaScript context
+            # Method 1: Check localStorage and sessionStorage more thoroughly
             device_id = self.driver.execute_script("""
-                // Check localStorage for device_id
+                // Check multiple storage locations
                 try {
-                    var deviceId = localStorage.getItem('device_id');
-                    if (deviceId) return deviceId;
+                    // Check localStorage first with various key patterns
+                    var possibleKeys = [
+                        'device_id', 'deviceId', 'cr_device_id', 'crunchyroll_device_id', 
+                        'device_id_v2', 'client_device_id', 'user_device_id'
+                    ];
 
-                    // Check for device info in global objects
-                    if (window.cxApiParams && window.cxApiParams.deviceId) {
-                        return window.cxApiParams.deviceId;
+                    for (var key of possibleKeys) {
+                        var value = localStorage.getItem(key);
+                        if (value && value.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i)) {
+                            return value;
+                        }
                     }
 
-                    // Look for device_id in any stored data
+                    // Check sessionStorage
+                    for (var key of possibleKeys) {
+                        var value = sessionStorage.getItem(key);
+                        if (value && value.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i)) {
+                            return value;
+                        }
+                    }
+
+                    // Look for UUID patterns in any storage value
                     for (var i = 0; i < localStorage.length; i++) {
                         var key = localStorage.key(i);
                         var value = localStorage.getItem(key);
-                        if (value && value.includes('device') && value.match(/[a-f0-9\-]{36}/)) {
-                            var match = value.match(/([a-f0-9\-]{36})/);
+                        if (value && typeof value === 'string') {
+                            var match = value.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
                             if (match) return match[1];
                         }
                     }
 
+                    // Check if there's a device_id in any global variables
+                    if (typeof window.cxApiParams !== 'undefined' && window.cxApiParams.deviceId) {
+                        return window.cxApiParams.deviceId;
+                    }
+
                     return null;
                 } catch(e) {
+                    console.error('Device ID extraction error:', e);
                     return null;
                 }
             """)
@@ -300,22 +334,39 @@ class CrunchyrollScraper:
                 logger.debug(f"Found device_id: {device_id[:8]}...")
                 return device_id
 
-            # Also check cookies for device-related IDs
+            # Method 2: Check cookies for device-related IDs
             cookies = self.driver.get_cookies()
             for cookie in cookies:
-                if 'device' in cookie.get('name', '').lower():
-                    value = cookie.get('value', '')
-                    # Look for UUID pattern
+                name = cookie.get('name', '').lower()
+                value = cookie.get('value', '')
+
+                if 'device' in name and value:
+                    # Look for UUID pattern in cookie value
                     import re
-                    match = re.search(r'([a-f0-9\-]{36})', value)
+                    match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', value,
+                                      re.IGNORECASE)
                     if match:
-                        logger.debug(f"Found device_id in cookie: {cookie['name']}")
+                        logger.debug(f"Found device_id in cookie {name}: {match.group(1)[:8]}...")
                         return match.group(1)
 
+            # Method 3: Try to find it in page source (last resort)
+            try:
+                page_source = self.driver.page_source
+                import re
+                device_matches = re.findall(
+                    r'device[_-]?id["\s:=]+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', page_source,
+                    re.IGNORECASE)
+                if device_matches:
+                    logger.debug(f"Found device_id in page source: {device_matches[0][:8]}...")
+                    return device_matches[0]
+            except Exception as e:
+                logger.debug(f"Error searching page source: {e}")
+
+            logger.debug("Could not extract device_id from browser")
             return None
 
         except Exception as e:
-            logger.debug(f"Could not extract device_id: {e}")
+            logger.debug(f"Error extracting device_id: {e}")
             return None
 
     def _get_etp_anonymous_id(self) -> Optional[str]:
@@ -476,80 +527,126 @@ class CrunchyrollScraper:
             return []
 
     def _fetch_history_via_api_clean(self, account_id: str, max_pages: int) -> List[Dict[str, Any]]:
-        """Clean API fetching with proper pagination limits and minimal logging"""
+        """Clean API fetching using browser JavaScript to avoid Cloudflare blocks"""
         all_episodes = []
         page_size = 100
 
         try:
-            logger.info(f"🚀 Using Crunchyroll API (account: {account_id[:8]}...)")
+            logger.info(f"🚀 Using Crunchyroll API via browser (account: {account_id[:8]}...)")
 
-            # Get authentication
-            cookies = {cookie['name']: cookie['value'] for cookie in self.driver.get_cookies()}
-            headers = {
-                'User-Agent': self.driver.execute_script("return navigator.userAgent;"),
-                'Accept': 'application/json',
-                'Referer': 'https://www.crunchyroll.com/history',
-            }
+            # Fetch pages with strict limit enforcement using browser JavaScript
+            for page in range(max_pages):
+                logger.info(f"📄 Fetching page {page + 1}/{max_pages} via browser...")
 
-            # Add bearer token if available
-            if hasattr(self, 'access_token') and self.access_token:
-                headers['Authorization'] = f'Bearer {self.access_token}'
+                # Calculate pagination parameters
+                start_param = page * page_size if page > 0 else 0
 
-            import requests
-            session = requests.Session()
-            session.cookies.update(cookies)
-            session.headers.update(headers)
+                # Make API request through browser JavaScript
+                api_response = self.driver.execute_script("""
+                    const accountId = arguments[0];
+                    const pageSize = arguments[1];
+                    const startParam = arguments[2];
+                    const accessToken = arguments[3];
 
-            # Fetch pages with strict limit enforcement
-            for page in range(max_pages):  # STRICT: Only fetch max_pages
-                api_url = f"https://www.crunchyroll.com/content/v2/{account_id}/watch-history"
-                params = {
-                    'page_size': page_size,
-                    'locale': 'en-US'
-                }
+                    // Build the API URL
+                    const apiUrl = `https://www.crunchyroll.com/content/v2/${accountId}/watch-history`;
+                    const params = new URLSearchParams({
+                        page_size: pageSize,
+                        locale: 'en-US'
+                    });
 
-                if page > 0:
-                    params['start'] = page * page_size
+                    if (startParam > 0) {
+                        params.append('start', startParam);
+                    }
 
-                try:
-                    response = session.get(api_url, params=params, timeout=30)
+                    const fullUrl = `${apiUrl}?${params.toString()}`;
 
-                    if response.status_code != 200:
-                        logger.error(f"API failed: {response.status_code}")
-                        break
+                    // Set up headers
+                    const headers = {
+                        'Accept': 'application/json',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'sec-fetch-dest': 'empty',
+                        'sec-fetch-mode': 'cors',
+                        'sec-fetch-site': 'same-origin'
+                    };
 
-                    data = response.json()
-                    items = data.get('data', [])
+                    // Add authorization header if we have access token
+                    if (accessToken) {
+                        headers['Authorization'] = `Bearer ${accessToken}`;
+                    }
 
-                    if not items:
-                        logger.info(f"No more items at page {page + 1}")
-                        break
+                    return fetch(fullUrl, {
+                        method: 'GET',
+                        headers: headers,
+                        credentials: 'include',
+                        mode: 'cors'
+                    })
+                    .then(response => {
+                        if (!response.ok) {
+                            return {
+                                success: false,
+                                status: response.status,
+                                statusText: response.statusText,
+                                url: fullUrl
+                            };
+                        }
+                        return response.json().then(data => ({
+                            success: true,
+                            status: response.status,
+                            data: data,
+                            url: fullUrl
+                        }));
+                    })
+                    .catch(error => ({
+                        success: false,
+                        error: error.message,
+                        url: fullUrl
+                    }));
+                """, account_id, page_size, start_param, getattr(self, 'access_token', None))
 
-                    # Parse episodes (with minimal logging)
-                    page_episodes = self._parse_api_response_clean(items)
-                    all_episodes.extend(page_episodes)
+                # Handle the response
+                if not api_response or not api_response.get('success'):
+                    status = api_response.get('status', 'unknown') if api_response else 'no response'
+                    error_msg = api_response.get('error', api_response.get('statusText',
+                                                                           'unknown error')) if api_response else 'no response'
+                    logger.error(f"API page {page + 1} failed: {status} - {error_msg}")
 
-                    logger.info(f"Page {page + 1}: {len(page_episodes)} valid episodes (total: {len(all_episodes)})")
+                    if api_response and api_response.get('url'):
+                        logger.debug(f"Failed URL: {api_response['url']}")
 
-                    # Stop if we got fewer items than page_size (last page)
-                    if len(items) < page_size:
-                        logger.info("Reached end of available data")
-                        break
-
-                    time.sleep(0.3)  # Rate limiting
-
-                except Exception as e:
-                    logger.error(f"Page {page + 1} failed: {e}")
                     break
+
+                data = api_response.get('data', {})
+                items = data.get('data', [])
+
+                if not items:
+                    logger.info(f"No more items at page {page + 1}")
+                    break
+
+                # Parse episodes (with minimal logging)
+                page_episodes = self._parse_api_response_clean(items)
+                all_episodes.extend(page_episodes)
+
+                logger.info(f"Page {page + 1}: {len(page_episodes)} valid episodes (total: {len(all_episodes)})")
+
+                # Stop if we got fewer items than page_size (last page)
+                if len(items) < page_size:
+                    logger.info("Reached end of available data")
+                    break
+
+                # Rate limiting
+                time.sleep(0.3)
 
             # Final summary only
             if all_episodes:
                 self._log_clean_summary(all_episodes)
+            else:
+                logger.warning("No episodes retrieved from browser-based API")
 
             return all_episodes
 
         except Exception as e:
-            logger.error(f"API scraping failed: {e}")
+            logger.error(f"Browser-based API scraping failed: {e}")
             return []
 
     def _log_clean_summary(self, all_episodes: List[Dict[str, Any]]) -> None:

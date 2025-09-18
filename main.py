@@ -13,7 +13,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from dotenv import load_dotenv
-# Fixed import - no src prefix needed since we added src to path
 from sync_manager import SyncManager
 
 # Load environment variables
