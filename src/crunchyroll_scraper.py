@@ -16,6 +16,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 
 from cache_manager import AuthCache
+from flaresolvrrr_client import FlareSolverrClient
 
 logger = logging.getLogger(__name__)
 
@@ -78,47 +79,52 @@ class CrunchyrollScraper:
         return False
 
     def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
-        """Get watch history with improved parsing logic"""
-        logger.info(f"📚 Scraping watch history (max {max_pages} pages = {max_pages * 2} scrolls)...")
+        """Get watch history using API only (no HTML fallback)"""
+        logger.info(f"📚 Fetching watch history via API (max {max_pages} pages)...")
 
         if not self.is_authenticated:
             logger.error("Not authenticated! Call authenticate() first.")
             return []
 
-        # Navigate to history page
-        logger.info("🧭 Navigating to history page...")
-        self.driver.get("https://www.crunchyroll.com/history")
-        time.sleep(5)
+        # Navigate to ensure authentication context
+        self.driver.get("https://www.crunchyroll.com")
+        time.sleep(2)
 
-        current_url = self.driver.current_url
-        logger.info(f"Current URL: {current_url}")
+        # Get account ID from token endpoint
+        account_id = self._get_account_id_from_token_endpoint()
 
-        if "history" not in current_url.lower():
-            logger.error(f"❌ Not on history page! Current URL: {current_url}")
-            self._save_debug_html("wrong_page.html")
+        if not account_id:
+            logger.error("Could not get account ID from token endpoint")
             return []
 
-        if not self._wait_for_page_load():
-            logger.error("Failed to load history page properly")
-            return []
-
-        # Save initial page
-        self._save_debug_html("history_page_loaded.html")
-
-        # Scrape with improved logic
-        return self._scrape_with_improved_parser(max_pages)
+        # Use API only - no HTML fallback
+        return self._fetch_history_via_api_clean(account_id, max_pages)
 
     def _scrape_with_improved_parser(self, max_pages: int) -> List[Dict[str, Any]]:
         """Scrape using improved parser logic with better logging"""
         all_episodes = []
+        seen_episodes = set()  # Track unique episodes to avoid duplicates
 
         try:
-            last_count = 0
             scroll_attempts = 0
             max_scrolls = max_pages * 2
 
             logger.info(f"🔄 Starting scraping (max {max_scrolls} scrolls for {max_pages} pages)")
 
+            # FIRST: Parse the initial page load (before any scrolling)
+            logger.info("📖 Parsing initial page load...")
+            initial_episodes = self._parse_with_improved_logic()
+
+            # Add initial episodes with deduplication
+            for episode in initial_episodes:
+                episode_key = self._create_episode_key(episode)
+                if episode_key not in seen_episodes:
+                    seen_episodes.add(episode_key)
+                    all_episodes.append(episode)
+
+            logger.info(f"📺 Initial load: Found {len(all_episodes)} unique episodes")
+
+            # THEN: Scroll and accumulate additional episodes
             while scroll_attempts < max_scrolls:
                 # Scroll to bottom
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -127,14 +133,23 @@ class CrunchyrollScraper:
                 # Parse current episodes using improved logic
                 current_episodes = self._parse_with_improved_logic()
 
-                logger.info(f"📺 Scroll {scroll_attempts + 1}: Found {len(current_episodes)} total episodes")
+                # Count episodes before adding new ones
+                episodes_before = len(all_episodes)
 
-                # Check if we got new episodes
-                if len(current_episodes) > last_count:
-                    logger.info(f"✅ New episodes found: {len(current_episodes) - last_count}")
-                    last_count = len(current_episodes)
-                    all_episodes = current_episodes
-                else:
+                # Add new unique episodes only
+                new_episodes_count = 0
+                for episode in current_episodes:
+                    episode_key = self._create_episode_key(episode)
+                    if episode_key not in seen_episodes:
+                        seen_episodes.add(episode_key)
+                        all_episodes.append(episode)
+                        new_episodes_count += 1
+
+                logger.info(
+                    f"📺 Scroll {scroll_attempts + 1}: Found {new_episodes_count} new episodes (total: {len(all_episodes)})")
+
+                # Stop if no new episodes found
+                if new_episodes_count == 0:
                     logger.info("🏁 No new episodes found, stopping pagination")
                     break
 
@@ -143,25 +158,733 @@ class CrunchyrollScraper:
 
             # Log final results with more detail
             unique_series = set()
+            series_episode_counts = {}
+
             for episode in all_episodes:
                 series = episode.get('series_title', 'Unknown')
                 season = episode.get('season', 1)
-                unique_series.add(f"{series} (Season {season})")
+                series_season_key = f"{series} (Season {season})"
+                unique_series.add(series_season_key)
+
+                # Count episodes per series-season
+                if series_season_key not in series_episode_counts:
+                    series_episode_counts[series_season_key] = 0
+                series_episode_counts[series_season_key] += 1
 
             logger.info(f"✅ Scraping complete: {len(all_episodes)} total episodes")
             logger.info(f"📚 Unique series-seasons found: {len(unique_series)}")
 
-            # Log first few unique series for verification
-            for i, series_season in enumerate(sorted(list(unique_series))[:5], 1):
-                logger.info(f"  {i}. {series_season}")
-            if len(unique_series) > 5:
-                logger.info(f"  ... and {len(unique_series) - 5} more series-seasons")
+            # Log all unique series for verification
+            for i, (series_season, count) in enumerate(sorted(series_episode_counts.items()), 1):
+                logger.info(f"  {i}. {series_season}: {count} episodes")
 
             return all_episodes
 
         except Exception as e:
             logger.error(f"Error during scraping: {e}")
             return all_episodes
+
+    def _get_account_id_from_token_endpoint(self) -> Optional[str]:
+        """Get account ID from token endpoint using correct POST method"""
+        try:
+            # Get cookies and other data from browser
+            cookies = {cookie['name']: cookie['value'] for cookie in self.driver.get_cookies()}
+
+            # Try to extract device_id and etp-anonymous-id from browser
+            device_id = self._get_device_id()
+            etp_anonymous_id = self._get_etp_anonymous_id()
+
+            if not device_id:
+                logger.warning("Could not extract device_id, generating one...")
+                import uuid
+                device_id = str(uuid.uuid4())
+
+            # Set up headers exactly like the browser request
+            headers = {
+                'accept': 'application/json, text/plain, */*',
+                'accept-language': 'en-US,en;q=0.9',
+                'authorization': 'Basic bm9haWhkZXZtXzZpeWcwYThsMHE6',  # From your example
+                'content-type': 'application/x-www-form-urlencoded',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'user-agent': self.driver.execute_script("return navigator.userAgent;"),
+                'referer': 'https://www.crunchyroll.com/discover'
+            }
+
+            # Add etp-anonymous-id if we found it
+            if etp_anonymous_id:
+                headers['etp-anonymous-id'] = etp_anonymous_id
+
+            # Set up request body exactly like the browser
+            body_data = {
+                'device_id': device_id,
+                'device_type': 'Chrome on macOS',  # Could detect this dynamically
+                'grant_type': 'etp_rt_cookie'
+            }
+
+            import requests
+
+            # Make POST request to token endpoint
+            response = requests.post(
+                'https://www.crunchyroll.com/auth/v1/token',
+                headers=headers,
+                cookies=cookies,
+                data=body_data,  # Use data= for form-encoded body
+                timeout=30
+            )
+
+            logger.debug(f"Token endpoint response: {response.status_code}")
+
+            if response.status_code == 200:
+                token_data = response.json()
+                account_id = token_data.get('account_id')
+
+                if account_id:
+                    # Store access token for API calls
+                    self.access_token = token_data.get('access_token')
+                    logger.info(f"✅ Got account ID: {account_id[:8]}...")
+                    return account_id
+                else:
+                    logger.error("Token response missing account_id")
+                    logger.debug(f"Response keys: {list(token_data.keys())}")
+                    return None
+            elif response.status_code == 403:
+                logger.error("Token endpoint returned 403 - may need different auth approach")
+                logger.debug("Try refreshing browser session or checking if logged in properly")
+                return None
+            elif response.status_code == 401:
+                logger.error("Token endpoint returned 401 - authentication issue")
+                return None
+            else:
+                logger.error(f"Token endpoint failed: {response.status_code}")
+                logger.debug(f"Response: {response.text[:200]}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Token endpoint error: {e}")
+            return None
+
+    def _get_device_id(self) -> Optional[str]:
+        """Extract device_id from browser context"""
+        try:
+            # Try to get device_id from JavaScript context
+            device_id = self.driver.execute_script("""
+                // Check localStorage for device_id
+                try {
+                    var deviceId = localStorage.getItem('device_id');
+                    if (deviceId) return deviceId;
+
+                    // Check for device info in global objects
+                    if (window.cxApiParams && window.cxApiParams.deviceId) {
+                        return window.cxApiParams.deviceId;
+                    }
+
+                    // Look for device_id in any stored data
+                    for (var i = 0; i < localStorage.length; i++) {
+                        var key = localStorage.key(i);
+                        var value = localStorage.getItem(key);
+                        if (value && value.includes('device') && value.match(/[a-f0-9\-]{36}/)) {
+                            var match = value.match(/([a-f0-9\-]{36})/);
+                            if (match) return match[1];
+                        }
+                    }
+
+                    return null;
+                } catch(e) {
+                    return null;
+                }
+            """)
+
+            if device_id:
+                logger.debug(f"Found device_id: {device_id[:8]}...")
+                return device_id
+
+            # Also check cookies for device-related IDs
+            cookies = self.driver.get_cookies()
+            for cookie in cookies:
+                if 'device' in cookie.get('name', '').lower():
+                    value = cookie.get('value', '')
+                    # Look for UUID pattern
+                    import re
+                    match = re.search(r'([a-f0-9\-]{36})', value)
+                    if match:
+                        logger.debug(f"Found device_id in cookie: {cookie['name']}")
+                        return match.group(1)
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Could not extract device_id: {e}")
+            return None
+
+    def _get_etp_anonymous_id(self) -> Optional[str]:
+        """Extract etp-anonymous-id from browser context"""
+        try:
+            # Try to get from JavaScript
+            etp_id = self.driver.execute_script("""
+                // Check for etp-anonymous-id in various places
+                try {
+                    // Check localStorage
+                    var etpId = localStorage.getItem('etp_anonymous_id') || localStorage.getItem('etp-anonymous-id');
+                    if (etpId) return etpId;
+
+                    // Check global objects
+                    if (window.cxApiParams && window.cxApiParams.etpAnonymousId) {
+                        return window.cxApiParams.etpAnonymousId;
+                    }
+
+                    // Look in page source or meta tags
+                    var meta = document.querySelector('meta[name="etp-anonymous-id"]');
+                    if (meta) return meta.content;
+
+                    return null;
+                } catch(e) {
+                    return null;
+                }
+            """)
+
+            if etp_id:
+                logger.debug(f"Found etp-anonymous-id: {etp_id[:8]}...")
+                return etp_id
+
+            # Check cookies
+            cookies = self.driver.get_cookies()
+            for cookie in cookies:
+                if 'etp' in cookie.get('name', '').lower() or 'anonymous' in cookie.get('name', '').lower():
+                    value = cookie.get('value', '')
+                    import re
+                    match = re.search(r'([a-f0-9\-]{36})', value)
+                    if match:
+                        logger.debug(f"Found etp-anonymous-id in cookie: {cookie['name']}")
+                        return match.group(1)
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Could not extract etp-anonymous-id: {e}")
+            return None
+
+    def _fetch_history_via_api(self, account_id: str, max_pages: int) -> List[Dict[str, Any]]:
+        """Fetch history using Crunchyroll's JSON API with enhanced authentication"""
+        all_episodes = []
+        page_size = 100
+
+        try:
+            logger.info(f"🚀 Using Crunchyroll API with account ID: {account_id[:8]}...")
+
+            # Get cookies from the browser session
+            cookies = {cookie['name']: cookie['value'] for cookie in self.driver.get_cookies()}
+
+            # Set up headers - use access token if we have it
+            headers = {
+                'User-Agent': self.driver.execute_script("return navigator.userAgent;"),
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://www.crunchyroll.com/history',
+                'Origin': 'https://www.crunchyroll.com',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+            }
+
+            # Add Authorization header if we have an access token
+            if hasattr(self, 'access_token') and self.access_token:
+                headers['Authorization'] = f'Bearer {self.access_token}'
+                logger.debug("🔑 Using Bearer token for API authentication")
+
+            import requests
+            session = requests.Session()
+            session.cookies.update(cookies)
+            session.headers.update(headers)
+
+            for page in range(max_pages):
+                logger.info(f"📄 Fetching API page {page + 1}/{max_pages}...")
+
+                # Build API URL
+                api_url = f"https://www.crunchyroll.com/content/v2/{account_id}/watch-history"
+                params = {
+                    'page_size': page_size,
+                    'locale': 'en-US'
+                }
+
+                # Add pagination for subsequent pages
+                if page > 0:
+                    params['start'] = page * page_size
+
+                try:
+                    response = session.get(api_url, params=params, timeout=30)
+
+                    if response.status_code == 401:
+                        logger.error("❌ API authentication failed - trying to refresh token...")
+                        # Try to get a fresh token
+                        fresh_account_id = self._get_account_id_from_token_endpoint()
+                        if fresh_account_id and fresh_account_id == account_id:
+                            # Update headers with new token and retry
+                            if hasattr(self, 'access_token'):
+                                session.headers['Authorization'] = f'Bearer {self.access_token}'
+                                response = session.get(api_url, params=params, timeout=30)
+                            else:
+                                break
+                        else:
+                            break
+
+                    if response.status_code == 403:
+                        logger.error("❌ API access forbidden")
+                        break
+                    elif response.status_code != 200:
+                        logger.error(f"❌ API request failed: {response.status_code}")
+                        logger.debug(f"Response: {response.text[:500]}")
+                        break
+
+                    data = response.json()
+                    items = data.get('data', [])
+
+                    if not items:
+                        logger.info("📄 No more items found, stopping pagination")
+                        break
+
+                    logger.info(f"✅ Found {len(items)} items on page {page + 1}")
+
+                    # Parse episodes from this page
+                    page_episodes = self._parse_api_response(items)
+                    all_episodes.extend(page_episodes)
+
+                    # Check if we've reached the end
+                    total = data.get('total', 0)
+                    if len(all_episodes) >= total or len(items) < page_size:
+                        logger.info(f"📄 Reached end of history (total available: {total})")
+                        break
+
+                    time.sleep(0.5)  # Rate limiting
+
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"❌ Network error on page {page + 1}: {e}")
+                    break
+
+            # Log comprehensive results
+            if all_episodes:
+                self._log_api_results(all_episodes)
+            else:
+                logger.warning("❌ No episodes retrieved from API")
+
+            return all_episodes
+
+        except Exception as e:
+            logger.error(f"❌ API scraping failed: {e}")
+            return []
+
+    def _fetch_history_via_api_clean(self, account_id: str, max_pages: int) -> List[Dict[str, Any]]:
+        """Clean API fetching with proper pagination limits and minimal logging"""
+        all_episodes = []
+        page_size = 100
+
+        try:
+            logger.info(f"🚀 Using Crunchyroll API (account: {account_id[:8]}...)")
+
+            # Get authentication
+            cookies = {cookie['name']: cookie['value'] for cookie in self.driver.get_cookies()}
+            headers = {
+                'User-Agent': self.driver.execute_script("return navigator.userAgent;"),
+                'Accept': 'application/json',
+                'Referer': 'https://www.crunchyroll.com/history',
+            }
+
+            # Add bearer token if available
+            if hasattr(self, 'access_token') and self.access_token:
+                headers['Authorization'] = f'Bearer {self.access_token}'
+
+            import requests
+            session = requests.Session()
+            session.cookies.update(cookies)
+            session.headers.update(headers)
+
+            # Fetch pages with strict limit enforcement
+            for page in range(max_pages):  # STRICT: Only fetch max_pages
+                api_url = f"https://www.crunchyroll.com/content/v2/{account_id}/watch-history"
+                params = {
+                    'page_size': page_size,
+                    'locale': 'en-US'
+                }
+
+                if page > 0:
+                    params['start'] = page * page_size
+
+                try:
+                    response = session.get(api_url, params=params, timeout=30)
+
+                    if response.status_code != 200:
+                        logger.error(f"API failed: {response.status_code}")
+                        break
+
+                    data = response.json()
+                    items = data.get('data', [])
+
+                    if not items:
+                        logger.info(f"No more items at page {page + 1}")
+                        break
+
+                    # Parse episodes (with minimal logging)
+                    page_episodes = self._parse_api_response_clean(items)
+                    all_episodes.extend(page_episodes)
+
+                    logger.info(f"Page {page + 1}: {len(page_episodes)} valid episodes (total: {len(all_episodes)})")
+
+                    # Stop if we got fewer items than page_size (last page)
+                    if len(items) < page_size:
+                        logger.info("Reached end of available data")
+                        break
+
+                    time.sleep(0.3)  # Rate limiting
+
+                except Exception as e:
+                    logger.error(f"Page {page + 1} failed: {e}")
+                    break
+
+            # Final summary only
+            if all_episodes:
+                self._log_clean_summary(all_episodes)
+
+            return all_episodes
+
+        except Exception as e:
+            logger.error(f"API scraping failed: {e}")
+            return []
+
+    def _log_clean_summary(self, all_episodes: List[Dict[str, Any]]) -> None:
+        """Clean, concise summary logging"""
+        # Count unique series-seasons
+        series_counts = {}
+        for episode in all_episodes:
+            series = episode.get('series_title', 'Unknown')
+            season = episode.get('season', 1)
+            key = f"{series} S{season}"
+            series_counts[key] = series_counts.get(key, 0) + 1
+
+        logger.info("=" * 50)
+        logger.info(f"API RESULTS: {len(all_episodes)} episodes from {len(series_counts)} series-seasons")
+        logger.info("=" * 50)
+
+        # Show top series only (limit output)
+        sorted_series = sorted(series_counts.items(), key=lambda x: x[1], reverse=True)
+
+        for i, (series_season, count) in enumerate(sorted_series[:15], 1):  # Only show top 15
+            logger.info(f"{i:2d}. {series_season}: {count} episodes")
+
+        if len(sorted_series) > 15:
+            remaining = len(sorted_series) - 15
+            remaining_episodes = sum(count for _, count in sorted_series[15:])
+            logger.info(f"... and {remaining} more series ({remaining_episodes} episodes)")
+
+        logger.info("=" * 50)
+
+    def _parse_api_response_clean(self, items: List[Dict]) -> List[Dict[str, Any]]:
+        """Clean parsing with minimal debug output"""
+        episodes = []
+        skipped = 0
+
+        for item in items:
+            try:
+                panel = item.get('panel', {})
+                episode_metadata = panel.get('episode_metadata', {})
+
+                series_title = episode_metadata.get('series_title', '').strip()
+                episode_number = episode_metadata.get('episode_number', 0)
+
+                # Skip invalid entries silently
+                if not series_title or not episode_number or episode_number <= 0:
+                    skipped += 1
+                    continue
+
+                episodes.append({
+                    'series_title': series_title,
+                    'episode_title': panel.get('title', '').strip(),
+                    'episode_number': episode_number,
+                    'season': episode_metadata.get('season_number', 1),
+                    'date_played': item.get('date_played', ''),
+                    'fully_watched': item.get('fully_watched', False),
+                    'api_source': True
+                })
+
+            except Exception:
+                skipped += 1
+                continue
+
+        # Only log summary for this batch
+        if skipped > 0:
+            logger.debug(f"Skipped {skipped} invalid items from API response")
+
+        return episodes
+
+    def _log_api_results(self, all_episodes: List[Dict[str, Any]]) -> None:
+        """Log comprehensive API scraping results"""
+        unique_series = {}
+        date_range = {"earliest": None, "latest": None}
+
+        for episode in all_episodes:
+            # Count episodes per series-season
+            series = episode.get('series_title', 'Unknown')
+            season = episode.get('season', 1)
+            key = f"{series} (Season {season})"
+            if key not in unique_series:
+                unique_series[key] = 0
+            unique_series[key] += 1
+
+            # Track date range
+            date_played = episode.get('date_played', '')
+            if date_played:
+                if not date_range["earliest"] or date_played < date_range["earliest"]:
+                    date_range["earliest"] = date_played
+                if not date_range["latest"] or date_played > date_range["latest"]:
+                    date_range["latest"] = date_played
+
+        logger.info(f"✅ API scraping complete: {len(all_episodes)} total episodes")
+        logger.info(f"📚 Found {len(unique_series)} unique series-seasons")
+
+        if date_range["earliest"] and date_range["latest"]:
+            logger.info(f"📅 Date range: {date_range['earliest'][:10]} to {date_range['latest'][:10]}")
+
+        # Show series breakdown
+        logger.info("📊 Series breakdown:")
+        for i, (series_season, count) in enumerate(sorted(unique_series.items()), 1):
+            if i <= 20:  # Show first 20 series
+                logger.info(f"  {i:2d}. {series_season}: {count} episodes")
+            elif i == 21:
+                remaining = len(unique_series) - 20
+                logger.info(f"  ... and {remaining} more series")
+                break
+
+    def _parse_api_response(self, items: List[Dict]) -> List[Dict[str, Any]]:
+        """Parse episodes from API response"""
+        episodes = []
+
+        for item in items:
+            try:
+                panel = item.get('panel', {})
+                episode_metadata = panel.get('episode_metadata', {})
+
+                # Extract data from structured API response
+                series_title = episode_metadata.get('series_title', '')
+                episode_title = panel.get('title', '')
+                episode_number = episode_metadata.get('episode_number', 0)
+                season_number = episode_metadata.get('season_number', 1)
+                date_played = item.get('date_played', '')
+                fully_watched = item.get('fully_watched', False)
+
+                # Skip if missing essential data
+                if not series_title or not episode_number:
+                    logger.debug(f"Skipping API item - missing data: series='{series_title}', ep={episode_number}")
+                    continue
+
+                # Build clean episode data
+                episode_data = {
+                    'series_title': series_title,
+                    'episode_title': episode_title,
+                    'episode_number': episode_number,
+                    'season': season_number,
+                    'date_played': date_played,
+                    'fully_watched': fully_watched,
+                    'series_url': f"https://www.crunchyroll.com/series/{episode_metadata.get('series_slug_title', '')}",
+                    'episode_url': f"https://www.crunchyroll.com/watch/{item.get('id', '')}",
+                    'api_source': True
+                }
+
+                episodes.append(episode_data)
+
+            except Exception as e:
+                logger.debug(f"Error parsing API item: {e}")
+                continue
+
+        logger.debug(f"🔍 Parsed {len(episodes)} valid episodes from {len(items)} API items")
+        return episodes
+
+    def _extract_account_id(self) -> Optional[str]:
+        """Extract account ID using multiple improved methods"""
+        try:
+            logger.info("🔍 Trying multiple methods to extract account ID...")
+
+            # Method 1: Check page source for API calls or embedded data
+            try:
+                page_source = self.driver.page_source
+
+                # Look for the API endpoint in script tags or embedded JSON
+                patterns = [
+                    r'content/v2/([a-f0-9\-]{36})/watch-history',  # UUID pattern
+                    r'"account_id":\s*"([a-f0-9\-]{36})"',  # JSON account_id field
+                    r'"accountId":\s*"([a-f0-9\-]{36})"',  # camelCase variant
+                    r'/api/v2/user/([a-f0-9\-]{36})/',  # User API pattern
+                ]
+
+                for pattern in patterns:
+                    matches = re.findall(pattern, page_source)
+                    if matches:
+                        account_id = matches[0]
+                        logger.info(f"✅ Found account ID in page source: {account_id}")
+                        return account_id
+
+            except Exception as e:
+                logger.debug(f"Page source method failed: {e}")
+
+            # Method 2: Enhanced JavaScript extraction
+            try:
+                logger.debug("Trying enhanced JavaScript extraction...")
+                account_data = self.driver.execute_script("""
+                    // Method 2a: Check window objects
+                    if (typeof window !== 'undefined') {
+                        // Common state objects
+                        var stateKeys = ['__INITIAL_STATE__', '__PRELOADED_STATE__', '__STATE__', 'INITIAL_STATE', 'app_state'];
+                        for (var key of stateKeys) {
+                            if (window[key] && typeof window[key] === 'object') {
+                                var state = window[key];
+                                // Look for user/account data
+                                if (state.user && state.user.account_id) return state.user.account_id;
+                                if (state.user && state.user.id) return state.user.id;
+                                if (state.account && state.account.id) return state.account.id;
+                                if (state.auth && state.auth.account_id) return state.auth.account_id;
+                            }
+                        }
+
+                        // Method 2b: Check for API configuration
+                        if (window.cxApiParams) {
+                            if (window.cxApiParams.accountId) return window.cxApiParams.accountId;
+                            if (window.cxApiParams.userId) return window.cxApiParams.userId;
+                        }
+
+                        if (window.appConfig && window.appConfig.accountId) {
+                            return window.appConfig.accountId;
+                        }
+                    }
+
+                    // Method 2c: Check localStorage and sessionStorage
+                    try {
+                        var storageKeys = ['user', 'account', 'auth', 'crunchyroll_user', 'profile'];
+                        for (var storageType of [localStorage, sessionStorage]) {
+                            for (var key of storageKeys) {
+                                var data = storageType.getItem(key);
+                                if (data) {
+                                    var parsed = JSON.parse(data);
+                                    if (parsed.account_id) return parsed.account_id;
+                                    if (parsed.id) return parsed.id;
+                                    if (parsed.user && parsed.user.account_id) return parsed.user.account_id;
+                                }
+                            }
+                        }
+                    } catch(e) {}
+
+                    // Method 2d: Check meta tags
+                    var metas = document.querySelectorAll('meta[name*="account"], meta[name*="user"], meta[property*="account"]');
+                    for (var meta of metas) {
+                        if (meta.content && meta.content.match(/^[a-f0-9\-]{36}$/)) {
+                            return meta.content;
+                        }
+                    }
+
+                    return null;
+                """)
+
+                if account_data:
+                    logger.info(f"✅ Found account ID via JavaScript: {account_data}")
+                    return str(account_data)
+
+            except Exception as e:
+                logger.debug(f"JavaScript extraction failed: {e}")
+
+            # Method 3: Intercept network requests (more reliable)
+            try:
+                logger.debug("Trying network request interception...")
+
+                # Enable logging if not already enabled
+                try:
+                    caps = self.driver.desired_capabilities
+                    caps['goog:loggingPrefs'] = {'browser': 'ALL'}
+                except:
+                    pass
+
+                # Refresh the page to capture fresh network requests
+                logger.debug("Refreshing page to capture network requests...")
+                self.driver.refresh()
+                time.sleep(3)
+
+                # Check browser console logs for network requests
+                try:
+                    logs = self.driver.get_log('browser')
+                    for log in logs:
+                        message = log.get('message', '')
+                        if 'watch-history' in message or 'content/v2' in message:
+                            # Look for account ID patterns in log messages
+                            match = re.search(r'content/v2/([a-f0-9\-]{36})', message)
+                            if match:
+                                account_id = match.group(1)
+                                logger.info(f"✅ Extracted account ID from browser logs: {account_id}")
+                                return account_id
+                except Exception as e:
+                    logger.debug(f"Browser log method failed: {e}")
+
+            except Exception as e:
+                logger.debug(f"Network interception failed: {e}")
+
+            # Method 4: Try to trigger an API call and capture it
+            try:
+                logger.debug("Attempting to trigger API call...")
+
+                # Execute JavaScript to make a test API call or trigger one
+                self.driver.execute_script("""
+                    // Try to find and click a button that might trigger history loading
+                    var buttons = document.querySelectorAll('button, a');
+                    for (var btn of buttons) {
+                        var text = btn.textContent.toLowerCase();
+                        if (text.includes('load') || text.includes('more') || text.includes('history')) {
+                            console.log('Triggering potential API call via:', text);
+                            btn.click();
+                            break;
+                        }
+                    }
+
+                    // Or try to trigger scroll-based loading
+                    window.scrollTo(0, 100);
+                    setTimeout(() => window.scrollTo(0, 0), 500);
+                """)
+
+                time.sleep(2)
+
+                # Check the page source again after triggering
+                page_source = self.driver.page_source
+                match = re.search(r'content/v2/([a-f0-9\-]{36})/watch-history', page_source)
+                if match:
+                    account_id = match.group(1)
+                    logger.info(f"✅ Found account ID after triggering API call: {account_id}")
+                    return account_id
+
+            except Exception as e:
+                logger.debug(f"API trigger method failed: {e}")
+
+            # Method 5: Manual inspection helper
+            logger.warning("⚠️ Could not automatically extract account ID")
+            logger.info("💡 To find your account ID manually:")
+            logger.info("   1. Open browser dev tools (F12)")
+            logger.info("   2. Go to Network tab")
+            logger.info("   3. Refresh the history page")
+            logger.info("   4. Look for requests to 'watch-history'")
+            logger.info("   5. The URL will contain your account ID")
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error in account ID extraction: {e}")
+            return None
+
+    def _fallback_to_html_scraping(self, max_pages: int) -> List[Dict[str, Any]]:
+        """Disabled HTML fallback to prevent log spam"""
+        logger.warning("HTML fallback disabled - use API only")
+        return []
+
+    def _create_episode_key(self, episode: Dict[str, Any]) -> str:
+        """Create a unique key for an episode to avoid duplicates"""
+        series = episode.get('series_title', '')
+        season = episode.get('season', 1)
+        episode_num = episode.get('episode_number', 0)
+        return f"{series}|S{season}|E{episode_num}"
 
     def _parse_with_improved_logic(self) -> List[Dict[str, Any]]:
         """Parse using improved Crunchyroll-specific logic with better logging"""
@@ -290,7 +1013,6 @@ class CrunchyrollScraper:
             logger.debug(f"Error extracting card data: {e}")
 
         return None
-
 
     def _assess_parsing_confidence(self, season: int, episode: int, raw_text: str) -> str:
         """Assess confidence in parsing results"""
@@ -657,7 +1379,6 @@ class CrunchyrollScraper:
     def _authenticate_with_flaresolverr(self) -> bool:
         """Authenticate using FlareSolverr"""
         try:
-            from flaresolverr_client import FlareSolverrClient
 
             logger.info("🔥 Authenticating with FlareSolverr...")
 
