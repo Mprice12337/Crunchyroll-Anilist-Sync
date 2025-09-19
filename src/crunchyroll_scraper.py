@@ -40,6 +40,11 @@ class CrunchyrollScraper:
         """Authenticate with Crunchyroll using cached or fresh credentials"""
         logger.info("🔐 Authenticating with Crunchyroll...")
 
+        # Initialize instance variables
+        self.access_token = None
+        self.cached_account_id = None
+        self.cached_device_id = None
+
         self._setup_driver()
 
         # Try cached authentication first
@@ -61,6 +66,50 @@ class CrunchyrollScraper:
         logger.error("❌ All authentication methods failed")
         return False
 
+    def _verify_cached_token(self) -> bool:
+        """Verify that cached access token is still valid"""
+        try:
+            if not self.access_token or not self.cached_account_id:
+                return False
+
+            # Make a simple API call to verify token validity
+            test_response = self.driver.execute_script("""
+                const accessToken = arguments[0];
+                const accountId = arguments[1];
+
+                return fetch(`https://www.crunchyroll.com/content/v2/${accountId}/watch-history?page_size=1&locale=en-US`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`,
+                        'sec-fetch-dest': 'empty',
+                        'sec-fetch-mode': 'cors',
+                        'sec-fetch-site': 'same-origin'
+                    },
+                    credentials: 'include',
+                    mode: 'cors'
+                })
+                .then(response => ({
+                    success: response.ok,
+                    status: response.status
+                }))
+                .catch(error => ({
+                    success: false,
+                    error: error.message
+                }));
+            """, self.access_token, self.cached_account_id)
+
+            if test_response and test_response.get('success'):
+                logger.debug("✅ Cached token is valid")
+                return True
+            else:
+                logger.debug(f"❌ Cached token invalid: {test_response}")
+                return False
+
+        except Exception as e:
+            logger.debug(f"Error verifying cached token: {e}")
+            return False
+
     def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
         """Get watch history using Crunchyroll API"""
         logger.info(f"📚 Fetching watch history via API (max {max_pages} pages)...")
@@ -81,6 +130,38 @@ class CrunchyrollScraper:
 
         # Fetch history via browser-based API calls
         return self._fetch_history_via_browser_api(account_id, max_pages)
+
+    def _get_or_create_device_id(self) -> str:
+        """Get existing device_id from cache/browser or create a consistent one"""
+        try:
+            # First, try cached device_id
+            if hasattr(self, 'cached_device_id') and self.cached_device_id:
+                logger.debug(f"Using cached device_id: {self.cached_device_id[:8]}...")
+                return self.cached_device_id
+
+            # Try to get from browser storage
+            device_id = self._get_device_id()
+            if device_id:
+                logger.debug(f"Found device_id in browser: {device_id[:8]}...")
+                return device_id
+
+            # Create a consistent device_id based on user email (so it's the same across runs)
+            import hashlib
+            email_hash = hashlib.md5(self.email.encode()).hexdigest()
+            # Format as UUID
+            device_id = f"{email_hash[:8]}-{email_hash[8:12]}-{email_hash[12:16]}-{email_hash[16:20]}-{email_hash[20:32]}"
+
+            logger.debug(f"Generated consistent device_id: {device_id[:8]}...")
+
+            # Store it in localStorage for future use
+            self.driver.execute_script(f"localStorage.setItem('cr_device_id', '{device_id}');")
+
+            return device_id
+
+        except Exception as e:
+            logger.debug(f"Error getting/creating device_id: {e}")
+            # Fallback to random UUID
+            return str(uuid.uuid4())
 
     def cleanup(self) -> None:
         """Clean up browser resources"""
@@ -124,7 +205,7 @@ class CrunchyrollScraper:
             raise
 
     def _try_cached_auth(self) -> bool:
-        """Load and apply cached authentication cookies"""
+        """Load and apply cached authentication cookies and tokens"""
         cached_auth = self.auth_cache.load_crunchyroll_auth()
         if not cached_auth:
             return False
@@ -157,6 +238,16 @@ class CrunchyrollScraper:
                 except Exception as e:
                     logger.debug(f"Failed to add cookie {cookie.get('name')}: {e}")
                     continue
+
+            # Load cached access_token and device_id if available
+            self.access_token = cached_auth.get('access_token')
+            self.cached_account_id = cached_auth.get('account_id')
+            self.cached_device_id = cached_auth.get('device_id')
+
+            if self.access_token and self.cached_account_id:
+                logger.info("✅ Cached access token and account ID loaded")
+            else:
+                logger.debug("No cached access token/account ID found")
 
             logger.info("✅ Cached cookies loaded successfully")
             return True
@@ -404,24 +495,44 @@ class CrunchyrollScraper:
             return {}
 
     def _cache_authentication(self) -> None:
-        """Save current authentication cookies to cache"""
+        """Save current authentication cookies and tokens to cache"""
         try:
             if self.driver:
                 cookies = self.driver.get_cookies()
-                self.auth_cache.save_crunchyroll_auth(cookies=cookies)
-                logger.debug("✅ Authentication cached")
+
+                # Cache cookies along with access_token, account_id, and device_id
+                auth_data = {
+                    'access_token': getattr(self, 'access_token', None),
+                    'account_id': getattr(self, 'cached_account_id', None),
+                    'device_id': getattr(self, 'cached_device_id', None)
+                }
+
+                self.auth_cache.save_crunchyroll_auth(cookies=cookies, **auth_data)
+                logger.debug("✅ Authentication and tokens cached")
         except Exception as e:
             logger.error(f"Error caching authentication: {e}")
 
     # ==================== API METHODS ====================
 
     def _get_account_id(self) -> Optional[str]:
-        """Get account ID by making token request through browser"""
+        """Get account ID, using cached value if available or making token request if needed"""
         try:
+            # First, try to use cached account_id and access_token
+            if hasattr(self, 'cached_account_id') and hasattr(self, 'access_token') and \
+                    self.cached_account_id and self.access_token:
+
+                logger.info(f"✅ Using cached account ID: {self.cached_account_id[:8]}...")
+
+                # Verify the cached token is still valid by making a simple API call
+                if self._verify_cached_token():
+                    return self.cached_account_id
+                else:
+                    logger.info("Cached token invalid, requesting new one...")
+
             logger.info("Getting account ID via browser JavaScript...")
 
-            # Get device ID for token request
-            device_id = self._get_device_id() or str(uuid.uuid4())
+            # Get or generate device ID consistently
+            device_id = self._get_or_create_device_id()
             logger.debug(f"Making token request with device_id: {device_id[:8]}...")
 
             # Make token request via browser JavaScript
@@ -474,9 +585,15 @@ class CrunchyrollScraper:
             data = token_response.get('data', {})
             account_id = data.get('account_id')
             self.access_token = data.get('access_token')
+            self.cached_account_id = account_id
+            self.cached_device_id = device_id
 
             if account_id:
-                logger.info(f"✅ Got account ID via browser: {account_id[:8]}...")
+                logger.info(f"✅ Got new account ID via browser: {account_id[:8]}...")
+
+                # Update cache with new tokens
+                self._cache_authentication()
+
                 return account_id
             else:
                 logger.error("Token response missing account_id")
@@ -633,7 +750,7 @@ class CrunchyrollScraper:
             return []
 
     def _parse_api_response(self, items: List[Dict]) -> List[Dict[str, Any]]:
-        """Parse episodes from API response items"""
+        """Parse episodes from API response items with proper season detection"""
         episodes = []
         skipped = 0
 
@@ -644,23 +761,47 @@ class CrunchyrollScraper:
 
                 series_title = episode_metadata.get('series_title', '').strip()
                 episode_number = episode_metadata.get('episode_number', 0)
+                episode_title = panel.get('title', '').strip()
+                season_title = episode_metadata.get('season_title', '').strip()
 
                 # Skip invalid entries
                 if not series_title or not episode_number or episode_number <= 0:
                     skipped += 1
                     continue
 
+                # CRITICAL: Check if this is compilation/recap content that should be skipped
+                if self._is_compilation_or_recap_content(season_title, episode_title, episode_metadata):
+                    logger.debug(f"Skipping compilation/recap content: {series_title} - {season_title} - {episode_title}")
+                    skipped += 1
+                    continue
+
+                # Use season_display_number as primary source, fall back to parsing season_title
+                detected_season = self._extract_correct_season_number(episode_metadata)
+
+                # Safely handle season_display_number for debugging
+                season_display_number = episode_metadata.get('season_display_number', '').strip()
+                raw_season_number = None
+                if season_display_number and season_display_number.isdigit():
+                    try:
+                        raw_season_number = int(season_display_number)
+                    except ValueError:
+                        raw_season_number = None
+
                 episodes.append({
                     'series_title': series_title,
-                    'episode_title': panel.get('title', '').strip(),
+                    'episode_title': episode_title,
                     'episode_number': episode_number,
-                    'season': episode_metadata.get('season_number', 1),
+                    'season': detected_season,
+                    'season_title': season_title,
+                    'raw_season_number': raw_season_number,  # Keep for debugging, can be None
+                    'season_display_number': season_display_number,  # Keep raw string for debugging
                     'date_played': item.get('date_played', ''),
                     'fully_watched': item.get('fully_watched', False),
                     'api_source': True
                 })
 
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Error parsing episode item: {e}")
                 skipped += 1
                 continue
 
@@ -669,13 +810,106 @@ class CrunchyrollScraper:
 
         return episodes
 
+    def _validate_and_correct_season(self, series_title: str, episode_number: int,
+                                     raw_season: int, episode_title: str) -> int:
+        """Validate and correct season number based on known patterns"""
+
+        # For very high season numbers, it's likely an error
+        if raw_season > 10:
+            logger.debug(f"Suspicious season number {raw_season} for {series_title}, defaulting to 1")
+            return 1
+
+        # Check for known problematic patterns
+        series_lower = series_title.lower()
+        episode_title_lower = episode_title.lower()
+
+        # Known single-season anime that Crunchyroll might misclassify
+        single_season_patterns = [
+            'dan da dan',
+            'kabaneri of the iron fortress',
+            'chainsaw man',  # Only season 1 exists currently
+        ]
+
+        for pattern in single_season_patterns:
+            if pattern in series_lower:
+                if raw_season > 1:
+                    logger.debug(f"Correcting season for known single-season anime: {series_title} S{raw_season} → S1")
+                return 1
+
+        # For very high episode numbers, might indicate absolute numbering
+        # In this case, season 1 is more likely correct
+        if episode_number > 50 and raw_season > 1:
+            logger.debug(
+                f"High episode number {episode_number} with season {raw_season}, using season 1 for {series_title}")
+            return 1
+
+        # Check episode title for season indicators that might override
+        if episode_title_lower:
+            # Look for explicit season indicators in episode title
+            season_match = re.search(r'season\s+(\d+)', episode_title_lower)
+            if season_match:
+                detected = int(season_match.group(1))
+                if detected != raw_season:
+                    logger.debug(
+                        f"Episode title indicates season {detected} vs API season {raw_season} for {series_title}")
+                    return detected
+
+        # For reasonable season numbers (1-4), trust the API but with caution
+        if 1 <= raw_season <= 4:
+            return raw_season
+
+        # Default to season 1 for anything else
+        logger.debug(f"Defaulting to season 1 for {series_title} (raw season: {raw_season})")
+        return 1
+
+    def _is_compilation_or_recap_content(self, season_title: str, episode_title: str,
+                                         episode_metadata: Dict[str, Any]) -> bool:
+        """Detect compilation, recap, or movie content that should be skipped"""
+
+        # Check season title for compilation indicators
+        season_title_lower = season_title.lower() if season_title else ""
+
+        # Handle None or empty season_title properly
+        if not season_title or season_title.strip() == "":
+            # Check if season_display_number is empty (often indicates specials/compilations)
+            season_display_number = episode_metadata.get('season_display_number', '').strip()
+            if not season_display_number:
+                # Additional check - if it's a very long duration, it might be a compilation
+                duration_ms = episode_metadata.get('duration_ms', 0)
+                normal_episode_duration = 25 * 60 * 1000  # 25 minutes in milliseconds
+                if duration_ms > normal_episode_duration * 2:  # More than 50 minutes
+                    logger.debug(f"Long duration content detected ({duration_ms / 1000 / 60:.1f} min), likely compilation")
+                    return True
+
+        compilation_indicators = [
+            'compilation', 'recap', 'summary', 'movie', 'film',
+            'gekijouban', 'theatrical', 'special collection'
+        ]
+
+        for indicator in compilation_indicators:
+            if indicator in season_title_lower:
+                return True
+
+        # Check episode title for compilation indicators
+        episode_title_lower = episode_title.lower() if episode_title else ""
+        for indicator in compilation_indicators:
+            if indicator in episode_title_lower:
+                return True
+
+        # Check identifier pattern - sometimes compilations have different patterns
+        identifier = episode_metadata.get('identifier', '')
+        if identifier and '|M' in identifier:  # 'M' often indicates movie/compilation
+            return True
+
+        return False
+
     def _log_api_summary(self, all_episodes: List[Dict[str, Any]]) -> None:
         """Log clean summary of API results"""
-        # Count episodes per series-season
+        # Count episodes per series-season using the processed season field
         series_counts = {}
         for episode in all_episodes:
             series = episode.get('series_title', 'Unknown')
-            season = episode.get('season', 1)
+            season = episode.get('season', 1)  # Use the processed season field
             key = f"{series} S{season}"
             series_counts[key] = series_counts.get(key, 0) + 1
 
@@ -694,6 +928,75 @@ class CrunchyrollScraper:
             logger.info(f"... and {remaining} more series ({remaining_episodes} episodes)")
 
         logger.info("=" * 50)
+
+    def _extract_correct_season_number(self, episode_metadata: Dict[str, Any]) -> int:
+        """Extract correct season number using season_display_number as primary source"""
+
+        # Primary: Use season_display_number if available and numeric
+        season_display_number = episode_metadata.get('season_display_number', '').strip()
+        logger.debug(f"extract_correct_season_number - Input season_display_number: {season_display_number!r}")
+
+        if season_display_number and season_display_number.isdigit():
+            try:
+                season_num = int(season_display_number)
+                if 1 <= season_num <= 20:  # Reasonable range
+                    logger.debug(f"Using season_display_number: {season_num}")
+                    return season_num
+                else:
+                    logger.debug(f"season_display_number {season_num} out of reasonable range, falling back")
+            except ValueError:
+                logger.debug(f"Could not convert season_display_number '{season_display_number}' to int")
+        else:
+            logger.debug(f"season_display_number is empty or non-numeric: {season_display_number!r}")
+
+        # Secondary: Parse season number from season_title
+        season_title = episode_metadata.get('season_title', '')
+        if season_title:
+            extracted_season = self._extract_season_from_title(season_title)
+            if extracted_season > 1:
+                logger.debug(f"Using season from title parsing: {extracted_season}")
+                return extracted_season
+
+        # Tertiary: Use season_sequence_number if it makes sense
+        season_sequence = episode_metadata.get('season_sequence_number', 0)
+        if isinstance(season_sequence, int) and 1 <= season_sequence <= 10:
+            logger.debug(f"Using season_sequence_number: {season_sequence}")
+            return season_sequence
+
+        # Last resort: Use the raw season_number but validate it
+        raw_season_number = episode_metadata.get('season_number', 1)
+        if isinstance(raw_season_number, int) and 1 <= raw_season_number <= 10:
+            logger.debug(f"Using raw season_number: {raw_season_number}")
+            return raw_season_number
+
+        # Default to season 1
+        logger.debug("Defaulting to season 1")
+        return 1
+
+
+    def _extract_season_from_title(self, title: str) -> int:
+        """Extract season number from season title"""
+        if not title:
+            return 1
+
+        # Look for "Season X" or "Season X" patterns
+        season_patterns = [
+            r'Season\s+(\d+)',  # "Season 2"
+            r'(\d+)(?:st|nd|rd|th)?\s+Season',  # "2nd Season"
+            r'Part\s+(\d+)',  # "Part 2"
+        ]
+
+        for pattern in season_patterns:
+            match = re.search(pattern, title, re.IGNORECASE)
+            if match:
+                try:
+                    season_num = int(match.group(1))
+                    if 1 <= season_num <= 20:  # Reasonable range
+                        return season_num
+                except (ValueError, IndexError):
+                    continue
+
+        return 1
 
     # ==================== UTILITY METHODS ====================
 
