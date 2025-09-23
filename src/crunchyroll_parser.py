@@ -9,9 +9,8 @@ from typing import List, Dict, Any
 logger = logging.getLogger(__name__)
 
 
-
 class CrunchyrollParser:
-    """Clean Crunchyroll scraper using API-based history fetching"""
+    """Crunchyroll API response parser"""
 
     def _parse_api_response(self, items: List[Dict]) -> List[Dict[str, Any]]:
         """Parse episodes from API response items with proper season detection"""
@@ -90,7 +89,6 @@ class CrunchyrollParser:
 
         return episodes
 
-
     def _is_compilation_or_recap_content(self, season_title: str, episode_title: str,
                                          episode_metadata: Dict[str, Any]) -> bool:
         """Detect compilation, recap content that should be skipped (but NOT movies)"""
@@ -115,7 +113,6 @@ class CrunchyrollParser:
         # Movies should be processed normally and assigned season 0 by _extract_correct_season_number
 
         return False
-
 
     def _log_api_summary(self, all_episodes: List[Dict[str, Any]]) -> None:
         """Log clean summary of API results"""
@@ -152,7 +149,6 @@ class CrunchyrollParser:
             logger.info(f"... and {remaining} more series ({remaining_episodes} episodes)")
 
         logger.info("=" * 50)
-
 
     def _extract_correct_season_number(self, episode_metadata: Dict[str, Any]) -> int:
         """Extract correct season number using season_display_number as primary source with CONSERVATIVE movie detection"""
@@ -203,7 +199,6 @@ class CrunchyrollParser:
         logger.debug("Defaulting to season 1")
         return 1
 
-
     def _is_movie_or_special_content(self, episode_metadata: Dict[str, Any]) -> bool:
         """CONSERVATIVE detection of movie/special content - only return True for STRONG indicators"""
 
@@ -249,7 +244,6 @@ class CrunchyrollParser:
 
         # Default to NOT a movie/special unless we have strong evidence
         return False
-
 
     def _extract_season_from_title(self, title: str) -> int:
         """Extract season number from season title"""

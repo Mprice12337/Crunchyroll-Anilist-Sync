@@ -10,12 +10,13 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 from cache_manager import AuthCache
+from crunchyroll_auth import CrunchyrollAuth
+from crunchyroll_parser import CrunchyrollParser
 
 logger = logging.getLogger(__name__)
 
 
-
-class CrunchyrollScraper:
+class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
     """Clean Crunchyroll scraper using API-based history fetching"""
 
     def __init__(self, email: str, password: str, headless: bool = True,
@@ -58,50 +59,6 @@ class CrunchyrollScraper:
 
         logger.error("❌ All authentication methods failed")
         return False
-
-    def _verify_cached_token(self) -> bool:
-        """Verify that cached access token is still valid"""
-        try:
-            if not self.access_token or not self.cached_account_id:
-                return False
-
-            # Make a simple API call to verify token validity
-            test_response = self.driver.execute_script("""
-                const accessToken = arguments[0];
-                const accountId = arguments[1];
-
-                return fetch(`https://www.crunchyroll.com/content/v2/${accountId}/watch-history?page_size=1&locale=en-US`, {
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'application/json',
-                        'Authorization': `Bearer ${accessToken}`,
-                        'sec-fetch-dest': 'empty',
-                        'sec-fetch-mode': 'cors',
-                        'sec-fetch-site': 'same-origin'
-                    },
-                    credentials: 'include',
-                    mode: 'cors'
-                })
-                .then(response => ({
-                    success: response.ok,
-                    status: response.status
-                }))
-                .catch(error => ({
-                    success: false,
-                    error: error.message
-                }));
-            """, self.access_token, self.cached_account_id)
-
-            if test_response and test_response.get('success'):
-                logger.debug("✅ Cached token is valid")
-                return True
-            else:
-                logger.debug(f"❌ Cached token invalid: {test_response}")
-                return False
-
-        except Exception as e:
-            logger.debug(f"Error verifying cached token: {e}")
-            return False
 
     def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
         """Get watch history using Crunchyroll API"""
@@ -165,8 +122,6 @@ class CrunchyrollScraper:
                 logger.debug("Browser closed")
             except Exception as e:
                 logger.error(f"Error closing browser: {e}")
-
-
 
     # ==================== API METHODS ====================
 
@@ -404,8 +359,6 @@ class CrunchyrollScraper:
         except Exception as e:
             logger.error(f"Browser-based API scraping failed: {e}")
             return []
-
-
 
     # ==================== UTILITY METHODS ====================
 

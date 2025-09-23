@@ -13,28 +13,59 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 
-from cache_manager import AuthCache
 from flaresolvrrr_client import FlareSolverrClient
 
 logger = logging.getLogger(__name__)
 
 
-
 class CrunchyrollAuth:
-    """Clean Crunchyroll scraper using API-based history fetching"""
-
-    def __init__(self, email: str, password: str, headless: bool = True,
-                 flaresolverr_url: Optional[str] = None):
-        self.email = email
-        self.password = password
-        self.headless = headless
-        self.flaresolverr_url = flaresolverr_url
-        self.driver = None
-        self.auth_cache = AuthCache()
-        self.is_authenticated = False
-        self.access_token = None
+    """Crunchyroll authentication handler"""
 
     # ==================== AUTHENTICATION METHODS ====================
+
+    def _verify_cached_token(self) -> bool:
+        """Verify that cached access token is still valid"""
+        try:
+            if not self.access_token or not self.cached_account_id:
+                return False
+
+            # Make a simple API call to verify token validity
+            test_response = self.driver.execute_script("""
+                const accessToken = arguments[0];
+                const accountId = arguments[1];
+
+                return fetch(`https://www.crunchyroll.com/content/v2/${accountId}/watch-history?page_size=1&locale=en-US`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`,
+                        'sec-fetch-dest': 'empty',
+                        'sec-fetch-mode': 'cors',
+                        'sec-fetch-site': 'same-origin'
+                    },
+                    credentials: 'include',
+                    mode: 'cors'
+                })
+                .then(response => ({
+                    success: response.ok,
+                    status: response.status
+                }))
+                .catch(error => ({
+                    success: false,
+                    error: error.message
+                }));
+            """, self.access_token, self.cached_account_id)
+
+            if test_response and test_response.get('success'):
+                logger.debug("✅ Cached token is valid")
+                return True
+            else:
+                logger.debug(f"❌ Cached token invalid: {test_response}")
+                return False
+
+        except Exception as e:
+            logger.debug(f"Error verifying cached token: {e}")
+            return False
 
     def _setup_driver(self) -> None:
         """Initialize Chrome driver with appropriate options"""
@@ -64,7 +95,6 @@ class CrunchyrollAuth:
         except Exception as e:
             logger.error(f"Failed to setup Chrome driver: {e}")
             raise
-
 
     def _try_cached_auth(self) -> bool:
         """Load and apply cached authentication cookies and tokens"""
@@ -118,7 +148,6 @@ class CrunchyrollAuth:
             logger.error(f"Error loading cached auth: {e}")
             return False
 
-
     def _verify_authentication(self) -> bool:
         """Verify that authentication is working by checking account page"""
         try:
@@ -153,7 +182,6 @@ class CrunchyrollAuth:
             logger.error(f"Error verifying authentication: {e}")
             return False
 
-
     def _perform_fresh_authentication(self) -> bool:
         """Perform fresh authentication using available methods"""
         # Try FlareSolverr first if available
@@ -169,7 +197,6 @@ class CrunchyrollAuth:
                 return True
 
         return False
-
 
     def _authenticate_with_selenium(self) -> bool:
         """Authenticate using direct Selenium interaction"""
@@ -238,7 +265,6 @@ class CrunchyrollAuth:
             self._save_debug_html("selenium_auth_error.html")
             return False
 
-
     def _authenticate_with_flaresolverr(self) -> bool:
         """Authenticate using FlareSolverr service"""
         try:
@@ -292,7 +318,6 @@ class CrunchyrollAuth:
             logger.error(f"FlareSolverr authentication failed: {e}")
             return False
 
-
     def _find_form_field(self, wait, selectors: List[str], wait_for_presence: bool = True):
         """Find a form field using multiple selectors"""
         for selector in selectors:
@@ -307,7 +332,6 @@ class CrunchyrollAuth:
             except (TimeoutException, NoSuchElementException):
                 continue
         return None
-
 
     def _handle_cloudflare_challenge(self, max_wait: int = 60) -> bool:
         """Wait for Cloudflare challenge to complete"""
@@ -342,7 +366,6 @@ class CrunchyrollAuth:
         logger.warning("⚠️ Cloudflare challenge timeout")
         return False
 
-
     def _extract_login_form_data(self, html_content: str) -> Dict[str, str]:
         """Extract hidden form fields from login page"""
         try:
@@ -362,7 +385,6 @@ class CrunchyrollAuth:
         except Exception as e:
             logger.error(f"Error extracting form data: {e}")
             return {}
-
 
     def _cache_authentication(self) -> None:
         """Save current authentication cookies and tokens to cache"""
