@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 
 from cache_manager import AuthCache
 from flaresolvrrr_client import FlareSolverrClient
+from anime_matcher import AnimeMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -932,6 +933,11 @@ class CrunchyrollScraper:
     def _extract_correct_season_number(self, episode_metadata: Dict[str, Any]) -> int:
         """Extract correct season number using season_display_number as primary source"""
 
+        # First, check if this is a movie/special before any season logic
+        if self._is_movie_or_special_content(episode_metadata):
+            logger.debug("Detected movie/special content, treating as special entry")
+            return 0  # Use 0 to indicate movie/special
+
         # Primary: Use season_display_number if available and numeric
         season_display_number = episode_metadata.get('season_display_number', '').strip()
         logger.debug(f"extract_correct_season_number - Input season_display_number: {season_display_number!r}")
@@ -973,6 +979,245 @@ class CrunchyrollScraper:
         logger.debug("Defaulting to season 1")
         return 1
 
+    def _is_movie_or_special_content(self, episode_metadata: Dict[str, Any]) -> bool:
+        """Detect if this is a movie or special content based on multiple indicators"""
+
+        # Check identifier pattern - 'M' typically indicates movie
+        identifier = episode_metadata.get('identifier', '')
+        if identifier and '|M|' in identifier:
+            logger.debug(f"Movie indicator found in identifier: {identifier}")
+            return True
+
+        # Check if episode_number is null/missing (common for movies)
+        episode_number = episode_metadata.get('episode_number')
+        if episode_number is None:
+            logger.debug("No episode number - likely movie/special")
+            return True
+
+        # Check duration - movies are typically much longer
+        duration_ms = episode_metadata.get('duration_ms', 0)
+        normal_episode_duration = 25 * 60 * 1000  # 25 minutes in milliseconds
+        if duration_ms > normal_episode_duration * 2.5:  # More than ~62 minutes
+            logger.debug(f"Long duration detected ({duration_ms / 1000 / 60:.1f} min) - likely movie")
+            return True
+
+        # Check season_number for unusually high values (like 44 for JJK 0)
+        season_number = episode_metadata.get('season_number', 1)
+        if isinstance(season_number, int) and season_number > 20:
+            logger.debug(f"Unusually high season_number ({season_number}) - likely movie/special")
+            return True
+
+        # Check season_title for movie/special indicators
+        season_title = episode_metadata.get('season_title', '').lower()
+        movie_indicators = [
+            'movie', 'film', '0', 'zero', 'gekijouban',
+            'theatrical', 'cinema', 'feature'
+        ]
+
+        for indicator in movie_indicators:
+            if indicator in season_title:
+                logger.debug(f"Movie indicator '{indicator}' found in season_title: {season_title}")
+                return True
+
+        # Check if season_display_number is empty AND season_title doesn't clearly indicate a season
+        season_display_number = episode_metadata.get('season_display_number', '').strip()
+        if not season_display_number:
+            # If no clear season indicators and it's not clearly a regular season
+            if not any(word in season_title for word in ['season', 'part', 'arc']):
+                logger.debug("Empty season_display_number with no clear season indicators")
+                return True
+
+        return False
+
+    def _update_series_season_progress(self, series_title: str, season: int, episode_number: int) -> bool:
+        """Enhanced method with movie/special handling"""
+        try:
+            logger.info(f"🔍 Searching AniList for: {series_title} (Season {season})")
+
+            # Handle movies/specials differently
+            if season == 0:
+                logger.info(f"🎬 Processing as movie/special: {series_title}")
+                return self._update_movie_special_progress(series_title, episode_number)
+
+            # Search for anime on AniList FIRST
+            search_results = self.anilist_client.search_anime(series_title)
+            if not search_results:
+                logger.warning(f"❌ No AniList results found for: {series_title}")
+                self.sync_results['no_matches_found'] += 1
+                return False
+
+            logger.info(f"📚 Found {len(search_results)} AniList results for matching")
+
+            # Enhanced matching with season awareness
+            match_result = self.anime_matcher.find_best_match_with_season(
+                series_title, search_results, season
+            )
+
+            if not match_result:
+                logger.warning(f"❌ No suitable match found for: {series_title} (Season {season})")
+                self.sync_results['no_matches_found'] += 1
+                return False
+
+            best_match, similarity, matched_season = match_result
+            anime_id = best_match['id']
+            anime_title = best_match.get('title', {}).get('romaji', series_title)
+            total_episodes = best_match.get('episodes')
+
+            # CRITICAL: Validate episode number with AniList data
+            validated_episode, was_adjusted, adjustment_reason = self._validate_episode_with_anilist(
+                episode_number, total_episodes, series_title, matched_season
+            )
+
+            if was_adjusted:
+                logger.info(
+                    f"📊 Episode validation: {series_title} S{matched_season} E{episode_number} → E{validated_episode}")
+                logger.info(f"   Reason: {adjustment_reason}")
+                episode_number = validated_episode
+
+            # Check if season matches
+            if matched_season == season:
+                self.sync_results['season_matches'] += 1
+                logger.info(
+                    f"✅ Perfect season match: {anime_title} Season {matched_season} (similarity: {similarity:.2f})")
+            else:
+                self.sync_results['season_mismatches'] += 1
+                logger.warning(f"⚠️ Season mismatch: Expected S{season}, matched S{matched_season} for {anime_title}")
+
+            # Determine status based on episode count
+            status = None
+            if total_episodes and episode_number >= total_episodes:
+                status = 'COMPLETED'
+                logger.info(f"🏁 Will mark as completed ({episode_number}/{total_episodes})")
+            else:
+                logger.info(f"📈 Will update progress to {episode_number}/{total_episodes or '?'}")
+
+            # Dry run check
+            if self.config.get('dry_run'):
+                logger.info(f"[DRY RUN] Would update {anime_title} Season {matched_season} to episode {episode_number}")
+                if status:
+                    logger.info(f"[DRY RUN] Would mark as {status}")
+                return True
+
+            # Update progress
+            logger.info(f"🔄 Updating AniList progress for: {anime_title}")
+            success = self.anilist_client.update_anime_progress(
+                anime_id=anime_id,
+                progress=episode_number,
+                status=status
+            )
+
+            if success:
+                logger.info(f"✅ Successfully updated {anime_title} Season {matched_season} to episode {episode_number}")
+
+                # Cache successful mapping
+                self.cache_manager.save_anime_mapping(series_title, {
+                    'anilist_id': anime_id,
+                    'anilist_title': anime_title,
+                    'season': matched_season,
+                    'similarity': similarity
+                })
+
+                return True
+            else:
+                logger.error(f"❌ Failed to update {anime_title} on AniList")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Error updating {series_title} Season {season}: {e}", exc_info=True)
+            return False
+
+    def _update_movie_special_progress(self, series_title: str, episode_number: int) -> bool:
+        """Handle movies and specials separately"""
+        try:
+            logger.info(f"🎬 Processing movie/special: {series_title}")
+
+            # Search for anime on AniList
+            search_results = self.anilist_client.search_anime(series_title)
+            if not search_results:
+                logger.warning(f"❌ No AniList results found for movie/special: {series_title}")
+                self.sync_results['no_matches_found'] += 1
+                return False
+
+            # Look for movie format first, then fall back to regular matching
+            movie_match = None
+            best_match = None
+            best_similarity = 0.0
+
+            for candidate in search_results:
+                # Calculate similarity
+                similarity = self.anime_matcher._calculate_candidate_similarity(
+                    self.anime_matcher._normalize_title(series_title), candidate
+                )
+
+                # Prefer movies/specials for movie content
+                candidate_format = candidate.get('format', '').upper()
+                if candidate_format in ['MOVIE', 'SPECIAL', 'OVA', 'ONA']:
+                    similarity += 0.3  # Strong bonus for movie formats
+                    if not movie_match or similarity > movie_match[1]:
+                        movie_match = (candidate, similarity)
+
+                if similarity > best_similarity:
+                    best_match = candidate
+                    best_similarity = similarity
+
+            # Use movie match if found, otherwise use best match
+            final_match, final_similarity = movie_match if movie_match else (best_match, best_similarity)
+
+            if final_similarity < self.anime_matcher.similarity_threshold:
+                logger.warning(f"❌ No suitable match for movie/special: {series_title} (best: {final_similarity:.2f})")
+                self.sync_results['no_matches_found'] += 1
+                return False
+
+            anime_id = final_match['id']
+            anime_title = final_match.get('title', {}).get('romaji', series_title)
+            anime_format = final_match.get('format', 'UNKNOWN')
+
+            # For movies, always set to episode 1 and completed
+            if anime_format in ['MOVIE', 'SPECIAL']:
+                progress = 1
+                status = 'COMPLETED'
+                logger.info(f"🎬 Setting {anime_format} to completed (episode 1)")
+            else:
+                # For other formats, use the original episode number
+                progress = episode_number or 1
+                status = None
+                logger.info(f"📺 Setting progress to episode {progress}")
+
+            # Dry run check
+            if self.config.get('dry_run'):
+                logger.info(f"[DRY RUN] Would update {anime_title} ({anime_format}) to episode {progress}")
+                if status:
+                    logger.info(f"[DRY RUN] Would mark as {status}")
+                return True
+
+            # Update progress
+            success = self.anilist_client.update_anime_progress(
+                anime_id=anime_id,
+                progress=progress,
+                status=status
+            )
+
+            if success:
+                logger.info(f"✅ Successfully updated {anime_title} ({anime_format}) to episode {progress}")
+                if status:
+                    logger.info(f"✅ Marked as {status}")
+
+                # Cache successful mapping
+                self.cache_manager.save_anime_mapping(series_title, {
+                    'anilist_id': anime_id,
+                    'anilist_title': anime_title,
+                    'format': anime_format,
+                    'similarity': final_similarity
+                })
+
+                return True
+            else:
+                logger.error(f"❌ Failed to update {anime_title} on AniList")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Error updating movie/special {series_title}: {e}", exc_info=True)
+            return False
 
     def _extract_season_from_title(self, title: str) -> int:
         """Extract season number from season title"""
