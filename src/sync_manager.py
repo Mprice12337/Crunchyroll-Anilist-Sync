@@ -86,22 +86,26 @@ class SyncManager:
             self._cleanup()
 
     def _authenticate_services(self) -> bool:
-        """Authenticate with both Crunchyroll and AniList"""
+        """Add timing information to see the improvement"""
         logger.info("🔐 Authenticating with services...")
+        start_time = time.time()
 
-        # Authenticate with Crunchyroll
-        logger.info("Authenticating with Crunchyroll...")
+        # Crunchyroll auth (should be fast now)
+        cr_start = time.time()
         if not self.crunchyroll_scraper.authenticate():
-            logger.error("Failed to authenticate with Crunchyroll")
             return False
+        cr_time = time.time() - cr_start
+        logger.info(f"⚡ Crunchyroll auth: {cr_time:.1f}s")
 
-        # Authenticate with AniList
-        logger.info("Authenticating with AniList...")
+        # AniList auth
+        al_start = time.time()
         if not self.anilist_client.authenticate():
-            logger.error("Failed to authenticate with AniList")
             return False
+        al_time = time.time() - al_start
+        logger.info(f"⚡ AniList auth: {al_time:.1f}s")
 
-        logger.info("✅ Authentication successful")
+        total_time = time.time() - start_time
+        logger.info(f"✅ Total authentication: {total_time:.1f}s")
         return True
 
     def _scrape_crunchyroll_history(self) -> bool:

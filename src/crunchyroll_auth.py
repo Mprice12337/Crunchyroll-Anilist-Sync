@@ -25,6 +25,10 @@ class CrunchyrollAuth:
 
     def _verify_cached_token(self) -> bool:
         """Verify that cached access token is still valid"""
+        if self.driver is None:
+            # If no browser initialized yet, can't use this method
+            return False
+
         try:
             if not self.access_token or not self.cached_account_id:
                 return False
@@ -199,7 +203,7 @@ class CrunchyrollAuth:
         return False
 
     def _authenticate_with_selenium(self) -> bool:
-        """Authenticate using direct Selenium interaction"""
+        """Authenticate using direct Selenium interaction - FIXED to cache tokens"""
         try:
             logger.info("🌐 Authenticating with Selenium...")
 
@@ -256,7 +260,14 @@ class CrunchyrollAuth:
                 self._save_debug_html("login_failed.html")
                 return False
 
+            # Capture tokens after successful login
+            logger.info("✅ Login successful, capturing authentication tokens...")
+            self._capture_tokens_post_login()
+
+            # CRITICAL FIX: Cache the authentication data including tokens
+            logger.info("💾 Caching authentication data...")
             self._cache_authentication()
+
             logger.info("✅ Selenium authentication successful")
             return True
 
@@ -266,7 +277,7 @@ class CrunchyrollAuth:
             return False
 
     def _authenticate_with_flaresolverr(self) -> bool:
-        """Authenticate using FlareSolverr service"""
+        """Authenticate using FlareSolverr service - FIXED to cache tokens"""
         try:
             logger.info("🔥 Authenticating with FlareSolverr...")
 
@@ -308,7 +319,14 @@ class CrunchyrollAuth:
                     except Exception as e:
                         logger.debug(f"Failed to add FlareSolverr cookie: {e}")
 
+                # Capture tokens after successful FlareSolverr auth
+                logger.info("✅ FlareSolverr login successful, capturing authentication tokens...")
+                self._capture_tokens_post_login()
+
+                # CRITICAL FIX: Cache the authentication data including tokens
+                logger.info("💾 Caching authentication data...")
                 self._cache_authentication()
+
                 logger.info("✅ FlareSolverr authentication successful")
                 return True
 
@@ -387,19 +405,110 @@ class CrunchyrollAuth:
             return {}
 
     def _cache_authentication(self) -> None:
-        """Save current authentication cookies and tokens to cache"""
+        """Enhanced caching - save tokens along with cookies"""
         try:
-            if self.driver:
-                cookies = self.driver.get_cookies()
+            if not self.driver:
+                logger.warning("No driver available for caching")
+                return
 
-                # Cache cookies along with access_token, account_id, and device_id
-                auth_data = {
-                    'access_token': getattr(self, 'access_token', None),
-                    'account_id': getattr(self, 'cached_account_id', None),
-                    'device_id': getattr(self, 'cached_device_id', None)
-                }
+            cookies = self.driver.get_cookies()
 
-                self.auth_cache.save_crunchyroll_auth(cookies=cookies, **auth_data)
-                logger.debug("✅ Authentication and tokens cached")
+            # Prepare auth data with tokens
+            auth_data = {
+                'access_token': getattr(self, 'access_token', None),
+                'account_id': getattr(self, 'cached_account_id', None),
+                'device_id': getattr(self, 'cached_device_id', None)
+            }
+
+            # Log what we're caching for debugging
+            logger.info(f"💾 Caching authentication:")
+            logger.info(f"   - Cookies: {len(cookies)}")
+            logger.info(f"   - Access token: {'✅' if auth_data['access_token'] else '❌'}")
+            logger.info(f"   - Account ID: {'✅' if auth_data['account_id'] else '❌'}")
+            logger.info(f"   - Device ID: {'✅' if auth_data['device_id'] else '❌'}")
+
+            # Debug: Show first 8 chars of IDs for verification
+            if auth_data['access_token']:
+                logger.debug(f"   - Access token (first 20 chars): {auth_data['access_token'][:20]}...")
+            if auth_data['account_id']:
+                logger.debug(f"   - Account ID: {auth_data['account_id']}")
+            if auth_data['device_id']:
+                logger.debug(f"   - Device ID: {auth_data['device_id']}")
+
+            # Save to cache
+            success = self.auth_cache.save_crunchyroll_auth(cookies=cookies, **auth_data)
+
+            if success:
+                logger.info("✅ Authentication cached successfully")
+            else:
+                logger.error("❌ Failed to cache authentication")
+
+            # Verify cache was saved
+            cached_check = self.auth_cache.load_crunchyroll_auth()
+            if cached_check:
+                logger.info(f"✅ Cache verification: found {len(cached_check.get('cookies', []))} cookies, "
+                            f"token={'✅' if cached_check.get('access_token') else '❌'}, "
+                            f"account_id={'✅' if cached_check.get('account_id') else '❌'}")
+            else:
+                logger.error("❌ Cache verification failed - no cached data found")
+
         except Exception as e:
             logger.error(f"Error caching authentication: {e}")
+            import traceback
+            logger.debug(f"Cache error traceback: {traceback.format_exc()}")
+
+    def _capture_tokens_post_login(self):
+        """Simplified token capture - only use the method that works"""
+        try:
+            logger.info("🔍 Capturing authentication tokens via token endpoint...")
+
+            # Generate or get device ID
+            device_id = self._get_or_create_device_id()
+
+            # Make token request via browser JavaScript (maintains session context)
+            token_response = self.driver.execute_script("""
+                const deviceId = arguments[0];
+
+                return fetch("https://www.crunchyroll.com/auth/v1/token", {
+                    method: "POST",
+                    headers: {
+                        "accept": "*/*",
+                        "accept-language": "en-US,en;q=0.9",
+                        "authorization": "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "sec-fetch-dest": "empty",
+                        "sec-fetch-mode": "cors",
+                        "sec-fetch-site": "same-origin"
+                    },
+                    body: `device_id=${deviceId}&device_type=Chrome&grant_type=etp_rt_cookie`,
+                    mode: "cors",
+                    credentials: "include"
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return { success: false, status: response.status };
+                    }
+                    return response.json().then(data => ({ success: true, data: data }));
+                })
+                .catch(error => ({ success: false, error: error.message }));
+            """, device_id)
+
+            if token_response and token_response.get('success'):
+                data = token_response.get('data', {})
+                self.access_token = data.get('access_token')
+                self.cached_account_id = data.get('account_id')
+                self.cached_device_id = device_id
+
+                logger.info(f"✅ Successfully captured tokens:")
+                logger.info(f"   - Access token: {'✅' if self.access_token else '❌'}")
+                logger.info(f"   - Account ID: {'✅' if self.cached_account_id else '❌'}")
+                logger.info(f"   - Device ID: {'✅' if self.cached_device_id else '❌'}")
+
+                return True
+            else:
+                logger.error(f"❌ Token request failed: {token_response}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error capturing tokens: {e}")
+            return False

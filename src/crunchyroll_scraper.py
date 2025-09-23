@@ -31,7 +31,7 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
         self.access_token = None
 
     def authenticate(self) -> bool:
-        """Authenticate with Crunchyroll using cached or fresh credentials"""
+        """Fixed authentication with proper cached auth handling"""
         logger.info("🔐 Authenticating with Crunchyroll...")
 
         # Initialize instance variables
@@ -39,47 +39,101 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
         self.cached_account_id = None
         self.cached_device_id = None
 
+        # Quick check if we have any cached auth (no browser needed)
+        if not self._has_cached_auth():
+            logger.info("No cached authentication found, performing fresh login...")
+            self._setup_driver()
+
+            # Perform fresh auth and ensure caching happens
+            if self._perform_fresh_authentication():
+                logger.info("✅ Fresh authentication successful")
+                self.is_authenticated = True
+                return True
+            return False
+
+        # We have cached auth, setup browser and validate it
+        logger.info("Found cached authentication, validating...")
         self._setup_driver()
 
-        # Try cached authentication first
+        # Try cached authentication with browser context
         if self._try_cached_auth() and self._verify_authentication():
             logger.info("✅ Using cached authentication")
             self.is_authenticated = True
             return True
-        else:
-            # Clear invalid cache
-            self.auth_cache.clear_crunchyroll_auth()
 
-        # Fresh authentication
-        logger.info("Performing fresh authentication...")
+        # Cached auth failed, clear cache and try fresh auth
+        logger.info("Cached auth invalid, performing fresh authentication...")
+        self.auth_cache.clear_crunchyroll_auth()
 
         if self._perform_fresh_authentication():
+            logger.info("✅ Fresh authentication successful after cache failure")
             self.is_authenticated = True
             return True
 
         logger.error("❌ All authentication methods failed")
         return False
 
-    def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
-        """Get watch history using Crunchyroll API"""
-        logger.info(f"📚 Fetching watch history via API (max {max_pages} pages)...")
+    def _has_cached_auth(self) -> bool:
+        """FAST check if cached auth exists (no browser needed)"""
+        try:
+            cached_auth = self.auth_cache.load_crunchyroll_auth()
+            if not cached_auth:
+                return False
 
+            # Check if we have cookies or tokens
+            has_cookies = bool(cached_auth.get('cookies'))
+            has_tokens = bool(cached_auth.get('access_token') and cached_auth.get('account_id'))
+
+            return has_cookies or has_tokens
+
+        except Exception as e:
+            logger.debug(f"Error checking cached auth: {e}")
+            return False
+
+    def get_watch_history(self, max_pages: int = 10):
+        """Initialize browser here if not already done"""
         if not self.is_authenticated:
-            logger.error("Not authenticated! Call authenticate() first.")
-            return []
+            raise RuntimeError("Not authenticated! Call authenticate() first.")
 
-        # Ensure we're on Crunchyroll to maintain session context
-        self.driver.get("https://www.crunchyroll.com")
-        time.sleep(2)
+        # Initialize browser NOW (only when needed for data fetching)
+        if self.driver is None:
+            logger.info("🌐 Initializing browser for data fetching...")
+            self._setup_driver()
 
-        # Get account ID for API calls
-        account_id = self._get_account_id()
-        if not account_id:
-            logger.error("Could not get account ID from token endpoint")
-            return []
+            # Apply cached cookies to browser session
+            self._apply_cached_cookies_to_browser()
 
-        # Fetch history via browser-based API calls
-        return self._fetch_history_via_browser_api(account_id, max_pages)
+        # Rest of the method remains the same...
+        return self._fetch_history_via_browser_api(self.cached_account_id, max_pages)
+
+    def _apply_cached_cookies_to_browser(self):
+        """NEW METHOD: Apply cached cookies when browser is initialized"""
+        try:
+            cached_auth = self.auth_cache.load_crunchyroll_auth()
+            if not cached_auth:
+                return
+
+            # Navigate to Crunchyroll first
+            self.driver.get("https://www.crunchyroll.com")
+            time.sleep(2)
+
+            cookies = cached_auth.get('cookies', [])
+            logger.debug(f"Applying {len(cookies)} cached cookies...")
+
+            for cookie in cookies:
+                try:
+                    cookie_data = {
+                        'name': cookie.get('name'),
+                        'value': cookie.get('value'),
+                        'domain': cookie.get('domain', '.crunchyroll.com'),
+                        'path': cookie.get('path', '/'),
+                    }
+                    self.driver.add_cookie(cookie_data)
+                except Exception as e:
+                    logger.debug(f"Failed to add cookie: {e}")
+
+        except Exception as e:
+            logger.error(f"Error applying cookies: {e}")
 
     def _get_or_create_device_id(self) -> str:
         """Get existing device_id from cache/browser or create a consistent one"""
