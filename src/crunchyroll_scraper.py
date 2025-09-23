@@ -764,13 +764,28 @@ class CrunchyrollScraper:
                 episode_title = panel.get('title', '').strip()
                 season_title = episode_metadata.get('season_title', '').strip()
 
-                # Skip invalid entries
-                if not series_title or not episode_number or episode_number <= 0:
+                # Check if this is a movie/special (which may not have episode_number)
+                is_movie = self._is_movie_or_special_content(episode_metadata)
+
+                # Skip invalid entries, but allow movies through even without episode_number
+                if not series_title:
                     skipped += 1
+                    logger.debug(f"Skipping - no series title: {episode_title}")
                     continue
 
-                # CRITICAL: Check if this is compilation/recap content that should be skipped
-                if self._is_compilation_or_recap_content(season_title, episode_title, episode_metadata):
+                if not is_movie and (not episode_number or episode_number <= 0):
+                    skipped += 1
+                    logger.debug(f"Skipping - no valid episode number for non-movie: {series_title} - {episode_title}")
+                    continue
+
+                # For movies, set episode_number to 1 if it's None/0 for processing purposes
+                if is_movie and (not episode_number or episode_number <= 0):
+                    episode_number = 1
+                    logger.debug(f"Movie detected, setting episode_number to 1: {series_title} - {episode_title}")
+
+                # FIXED: Check if this is compilation/recap content that should be skipped
+                # BUT exclude movies (which should be processed with season 0)
+                if not is_movie and self._is_compilation_or_recap_content(season_title, episode_title, episode_metadata):
                     logger.debug(f"Skipping compilation/recap content: {series_title} - {season_title} - {episode_title}")
                     skipped += 1
                     continue
@@ -797,7 +812,8 @@ class CrunchyrollScraper:
                     'season_display_number': season_display_number,  # Keep raw string for debugging
                     'date_played': item.get('date_played', ''),
                     'fully_watched': item.get('fully_watched', False),
-                    'api_source': True
+                    'api_source': True,
+                    'is_movie': is_movie  # Add flag to track movies
                 })
 
             except Exception as e:
@@ -812,25 +828,26 @@ class CrunchyrollScraper:
 
     def _is_compilation_or_recap_content(self, season_title: str, episode_title: str,
                                          episode_metadata: Dict[str, Any]) -> bool:
-        """Detect compilation, recap, or movie content that should be skipped"""
+        """Detect compilation, recap content that should be skipped (but NOT movies)"""
 
         # Check season title for compilation indicators
         season_title_lower = season_title.lower() if season_title else ""
         episode_title_lower = episode_title.lower() if episode_title else ""
 
+        # FIXED: Separate compilation indicators from movie indicators
         compilation_indicators = [
-            'compilation', 'recap', 'summary', 'movie', 'film',
-            'gekijouban', 'theatrical', 'special collection'
+            'compilation', 'recap', 'summary', 'special collection'
         ]
 
         for indicator in compilation_indicators:
             if indicator in season_title_lower or indicator in episode_title_lower:
                 return True
 
-        # Check identifier pattern - sometimes compilations have different patterns
-        identifier = episode_metadata.get('identifier', '')
-        if identifier and '|M' in identifier:  # 'M' often indicates movie/compilation
-            return True
+        # FIXED: Do NOT check for |M| identifier here anymore
+        # Movies with |M| should be processed (with season 0), not skipped as compilation
+
+        # FIXED: Do NOT treat movies as compilation content
+        # Movies should be processed normally and assigned season 0 by _extract_correct_season_number
 
         return False
 
@@ -838,14 +855,24 @@ class CrunchyrollScraper:
         """Log clean summary of API results"""
         # Count episodes per series-season using the processed season field
         series_counts = {}
+        movie_count = 0
+
         for episode in all_episodes:
             series = episode.get('series_title', 'Unknown')
             season = episode.get('season', 1)  # Use the processed season field
-            key = f"{series} S{season}"
+            is_movie = episode.get('is_movie', False)
+
+            if is_movie:
+                movie_count += 1
+                key = f"{series} [MOVIE]"
+            else:
+                key = f"{series} S{season}"
             series_counts[key] = series_counts.get(key, 0) + 1
 
         logger.info("=" * 50)
         logger.info(f"API RESULTS: {len(all_episodes)} episodes from {len(series_counts)} series-seasons")
+        if movie_count > 0:
+            logger.info(f"  Including {movie_count} movies/specials")
         logger.info("=" * 50)
 
         # Show top 15 series
