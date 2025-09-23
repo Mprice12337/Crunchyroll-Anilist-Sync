@@ -73,8 +73,9 @@ class AnimeMatcher:
             # Get episode count
             episode_count = candidate.get('episodes') or 12  # Default fallback
 
-            # Get format to identify specials/movies
-            format_type = candidate.get('format', '').upper()
+            # Get format to identify specials/movies - FIX: Handle None values properly
+            format_value = candidate.get('format')
+            format_type = (format_value or '').upper()
 
             season_structure[season_num] = {
                 'candidate': candidate,
