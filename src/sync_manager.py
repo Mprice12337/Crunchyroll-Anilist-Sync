@@ -1,5 +1,5 @@
 """
-Enhanced sync manager with improved grouping logic and better logging
+Enhanced sync manager with improved movie/special handling
 """
 
 import logging
@@ -46,7 +46,8 @@ class SyncManager:
             'skipped_episodes': 0,
             'season_matches': 0,
             'season_mismatches': 0,
-            'no_matches_found': 0
+            'no_matches_found': 0,
+            'movies_skipped': 0  # New counter for skipped movies
         }
 
     def run_sync(self) -> bool:
@@ -121,8 +122,6 @@ class SyncManager:
                 logger.warning("⚠️ No watch history found")
                 return True  # Not necessarily an error
 
-            #logger.info(f"✅ Found {len(self.watch_history)} episodes in watch history")
-
             # Enhanced debug data saving
             if self.config.get('debug'):
                 self._save_enhanced_debug_data('watch_history.json', self.watch_history)
@@ -141,20 +140,6 @@ class SyncManager:
         if not self.watch_history:
             return
 
-        '''logger.info("📋 Sample of detected episodes (first 10):")
-        sample_size = min(10, len(self.watch_history))
-
-        for i, episode in enumerate(self.watch_history[:sample_size]):
-            series_title = episode.get('series_title', 'Unknown')
-            episode_number = episode.get('episode_number', 'Unknown')
-            season = episode.get('season', 1)
-            source = episode.get('source', 'unknown')
-
-            logger.info(f"  {i+1:2d}. {series_title} - S{season} E{episode_number}")
-
-        if len(self.watch_history) > sample_size:
-            logger.info(f"  ... and {len(self.watch_history) - sample_size} more episodes")'''
-
     def _update_anilist_progress_with_seasons(self) -> bool:
         """Enhanced progress update with season awareness and improved logging"""
         logger.info("🎯 Updating AniList progress with season awareness...")
@@ -170,7 +155,9 @@ class SyncManager:
 
         for i, ((series_title, season), latest_episode) in enumerate(series_progress.items(), 1):
             try:
-                logger.info(f"[{i}/{len(series_progress)}] Processing: {series_title} (Season {season}) - Episode {latest_episode}")
+                # FIXED: Better logging for movies vs seasons
+                season_display = "Movie" if season == 0 else f"Season {season}"
+                logger.info(f"[{i}/{len(series_progress)}] Processing: {series_title} ({season_display}) - Episode {latest_episode}")
 
                 if self._update_series_season_progress(series_title, season, latest_episode):
                     self.sync_results['successful_updates'] += 1
@@ -216,24 +203,11 @@ class SyncManager:
                 skipped_count += 1
                 continue
 
-            # IMPROVED: Validate episode number with AniList before grouping
-            if hasattr(self, 'episode_converter') and self.episode_converter:
-                # Try to get a quick validation without full AniList search
-                original_episode = episode_number
-                validated_episode, was_converted, reason = self._validate_episode_number(
-                    series_title, season, episode_number
-                )
-
-                if was_converted:
-                    episode_number = validated_episode
-                    conversion_count += 1
-                    logger.debug(
-                        f"Pre-grouping conversion: {series_title} S{season} E{original_episode} → E{episode_number} ({reason})")
-
             processed_count += 1
 
             # Track episodes per series for debugging
-            series_key = f"{series_title} S{season}"
+            season_display = "Movie" if season == 0 else f"S{season}"
+            series_key = f"{series_title} {season_display}"
             if series_key not in series_episode_counts:
                 series_episode_counts[series_key] = []
             series_episode_counts[series_key].append(episode_number)
@@ -244,33 +218,194 @@ class SyncManager:
             # Keep track of the highest episode number for each series-season
             if key not in series_season_progress:
                 series_season_progress[key] = episode_number
-                logger.debug(f"New series-season: {series_title} S{season} E{episode_number}")
+                season_display = "Movie" if season == 0 else f"S{season}"
+                logger.debug(f"New series-season: {series_title} {season_display} E{episode_number}")
             else:
                 old_episode = series_season_progress[key]
                 if episode_number > old_episode:
                     series_season_progress[key] = episode_number
-                    logger.debug(f"Updated progress: {series_title} S{season} E{old_episode} → E{episode_number}")
+                    season_display = "Movie" if season == 0 else f"S{season}"
+                    logger.debug(f"Updated progress: {series_title} {season_display} E{old_episode} → E{episode_number}")
 
         self.sync_results['total_episodes'] = len(episodes)
         self.sync_results['skipped_episodes'] = skipped_count
 
         logger.info(f"✅ Processed {processed_count} episodes, skipped {skipped_count}, converted {conversion_count}")
 
-        # IMPROVED: Show detailed episode breakdown per series
-        '''logger.info(f"📊 Detailed episode breakdown:")
-        for series_season, episode_list in series_episode_counts.items():
-            episode_range = f"E{min(episode_list)}-E{max(episode_list)}" if len(
-                episode_list) > 1 else f"E{episode_list[0]}"
-            logger.info(f"  {series_season}: {len(episode_list)} episodes ({episode_range})")
-
-        logger.info(f"📊 Final series-season progress (latest episodes only):")
-        for i, ((series, season), episode) in enumerate(sorted(series_season_progress.items()), 1):
-            logger.info(f"  {i:2d}. {series} (Season {season}) - Latest: Episode {episode}")'''
-
         return series_season_progress
 
     def _update_series_season_progress(self, series_title: str, season: int, episode_number: int) -> bool:
-        """Enhanced method with AniList-based episode validation"""
+        """Enhanced method with special movie/special handling"""
+        try:
+            # FIXED: Handle movies (season 0) differently
+            if season == 0:
+                return self._update_movie_progress(series_title, episode_number)
+            else:
+                return self._update_regular_season_progress(series_title, season, episode_number)
+
+        except Exception as e:
+            logger.error(f"❌ Error updating {series_title} Season {season}: {e}", exc_info=True)
+            return False
+
+    def _update_movie_progress(self, series_title: str, episode_number: int) -> bool:
+        """Handle movie/special updates with improved search and matching"""
+        try:
+            logger.info(f"🎬 Processing movie/special: {series_title}")
+
+            # FIXED: Search for movies with better titles
+            movie_search_queries = [
+                f"{series_title} 0",  # e.g., "JUJUTSU KAISEN 0"
+                f"{series_title} Movie",  # e.g., "JUJUTSU KAISEN Movie"
+                f"{series_title}",  # Fallback to base title
+            ]
+
+            best_match_result = None
+            best_similarity = 0.0
+
+            # Try different search queries for movies
+            for search_query in movie_search_queries:
+                logger.info(f"🔍 Searching AniList for movie: {search_query}")
+
+                search_results = self.anilist_client.search_anime(search_query)
+                if not search_results:
+                    continue
+
+                logger.info(f"📚 Found {len(search_results)} results for '{search_query}'")
+
+                # FIXED: Use movie-specific matching with higher threshold
+                for result in search_results:
+                    # Check if this is actually a movie/special
+                    format_type = (result.get('format', '') or '').upper()
+                    if format_type in ['MOVIE', 'SPECIAL', 'OVA', 'ONA']:
+                        # Calculate similarity for movies
+                        similarity = self._calculate_movie_similarity(series_title, result)
+
+                        if similarity > best_similarity and similarity >= 0.8:  # Higher threshold for movies
+                            best_match_result = (result, similarity, search_query)
+                            best_similarity = similarity
+
+                # If we found a good movie match, stop searching
+                if best_match_result and best_similarity >= 0.9:
+                    break
+
+            if not best_match_result:
+                logger.warning(f"🎬 No suitable movie match found for: {series_title}")
+                logger.info(f"💡 This might be a compilation or special not available on AniList")
+                self.sync_results['movies_skipped'] += 1
+                return False  # Don't count as failure, just skip
+
+            best_match, similarity, used_query = best_match_result
+            anime_id = best_match['id']
+            anime_title = best_match.get('title', {}).get('romaji', series_title)
+            format_type = best_match.get('format', 'Unknown')
+
+            logger.info(f"🎬 Found movie match: '{anime_title}' ({format_type}) - similarity: {similarity:.2f}")
+
+            # Dry run check
+            if self.config.get('dry_run'):
+                logger.info(f"[DRY RUN] Would update movie {anime_title} to episode {episode_number}")
+                return True
+
+            # Update progress for movie
+            logger.info(f"🔄 Updating AniList progress for movie: {anime_title}")
+            success = self.anilist_client.update_anime_progress(
+                anime_id=anime_id,
+                progress=episode_number,
+                status='COMPLETED'  # Movies are usually completed when watched
+            )
+
+            if success:
+                logger.info(f"✅ Successfully updated movie {anime_title} to episode {episode_number}")
+                return True
+            else:
+                logger.error(f"❌ Failed to update movie {anime_title} on AniList")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Error updating movie {series_title}: {e}", exc_info=True)
+            return False
+
+    def _calculate_movie_similarity(self, target_title: str, candidate: Dict[str, Any]) -> float:
+        """Calculate similarity specifically for movies"""
+        try:
+            target_normalized = self._normalize_title(target_title)
+
+            # Get all possible titles from the candidate
+            titles_to_check = []
+
+            title_obj = candidate.get('title', {})
+            if isinstance(title_obj, dict):
+                for key in ['romaji', 'english', 'native']:
+                    title = title_obj.get(key)
+                    if title:
+                        titles_to_check.append(title)
+
+            # Add synonyms
+            synonyms = candidate.get('synonyms', [])
+            if synonyms:
+                titles_to_check.extend(synonyms)
+
+            max_similarity = 0.0
+            for title in titles_to_check:
+                if title:
+                    candidate_normalized = self._normalize_title(title)
+                    similarity = self._calculate_similarity(target_normalized, candidate_normalized)
+                    max_similarity = max(max_similarity, similarity)
+
+            return max_similarity
+
+        except Exception as e:
+            logger.debug(f"Error calculating movie similarity: {e}")
+            return 0.0
+
+    def _normalize_title(self, title: str) -> str:
+        """Normalize title for better matching"""
+        if not title:
+            return ""
+
+        import re
+        normalized = title.lower()
+
+        # Remove common metadata that might interfere with matching
+        patterns_to_remove = [
+            r'\s*\(dub\)\s*',
+            r'\s*\(sub\)\s*',
+            r'\s*\(english dub\)\s*',
+            r'\s*\(\d{4}\)\s*$',  # Year in parentheses at end
+        ]
+
+        for pattern in patterns_to_remove:
+            normalized = re.sub(pattern, ' ', normalized)
+
+        # Remove special characters but keep important ones
+        normalized = re.sub(r'[^\w\s\-:!?]', ' ', normalized)
+
+        # Normalize whitespace
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+        return normalized
+
+    def _calculate_similarity(self, title1: str, title2: str) -> float:
+        """Calculate similarity between two normalized titles"""
+        if not title1 or not title2:
+            return 0.0
+
+        from difflib import SequenceMatcher
+
+        # Exact match
+        if title1 == title2:
+            return 1.0
+
+        # Substring matches
+        if title1 in title2 or title2 in title1:
+            shorter, longer = (title1, title2) if len(title1) < len(title2) else (title2, title1)
+            return max(0.9, len(shorter) / len(longer))
+
+        # Sequence matcher for fuzzy matching
+        return SequenceMatcher(None, title1, title2).ratio()
+
+    def _update_regular_season_progress(self, series_title: str, season: int, episode_number: int) -> bool:
+        """Handle regular season updates (existing logic)"""
         try:
             logger.info(f"🔍 Searching AniList for: {series_title} (Season {season})")
 
@@ -361,7 +496,7 @@ class SyncManager:
             return False
 
     def _report_enhanced_results(self) -> None:
-        """Report enhanced sync results with season information"""
+        """Report enhanced sync results with movie information"""
         results = self.sync_results
 
         logger.info("=" * 60)
@@ -374,6 +509,7 @@ class SyncManager:
         logger.info(f"  🎯 Season matches: {results['season_matches']}")
         logger.info(f"  ⚠️ Season mismatches: {results['season_mismatches']}")
         logger.info(f"  🔍 No matches found: {results['no_matches_found']}")
+        logger.info(f"  🎬 Movies/specials skipped: {results['movies_skipped']}")  # NEW
 
         if results['successful_updates'] > 0:
             total_attempts = results['successful_updates'] + results['failed_updates']
@@ -396,6 +532,9 @@ class SyncManager:
 
         if results['no_matches_found'] > 0:
             logger.info("💡 Tip: No matches may indicate very new anime or title differences between services")
+
+        if results['movies_skipped'] > 0:  # NEW
+            logger.info("💡 Tip: Movies/specials were skipped - they may be compilations not listed on AniList")
 
     def _validate_episode_with_anilist(self, episode_number: int, total_episodes: Optional[int],
                                        series_title: str, season: int) -> Tuple[int, bool, str]:
@@ -438,8 +577,6 @@ class SyncManager:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
 
-            #logger.debug(f"💾 Enhanced debug data saved: {filepath}")
-
             # Also save a summary for easier review
             if isinstance(data, list) and data and isinstance(data[0], dict):
                 summary_file = cache_dir / f"summary_{filename}"
@@ -456,8 +593,6 @@ class SyncManager:
 
                 with open(summary_file, 'w', encoding='utf-8') as f:
                     json.dump(summary, f, indent=2, ensure_ascii=False)
-
-                #logger.debug(f"📋 Summary saved: {summary_file}")
 
         except Exception as e:
             logger.error(f"Failed to save enhanced debug data: {e}")

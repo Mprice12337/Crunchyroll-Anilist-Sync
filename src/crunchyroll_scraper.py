@@ -90,21 +90,35 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
             logger.debug(f"Error checking cached auth: {e}")
             return False
 
-    def get_watch_history(self, max_pages: int = 10):
-        """Initialize browser here if not already done"""
+    def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
+        """Get watch history using Crunchyroll API with token validation"""
+        logger.info(f"📚 Fetching watch history via API (max {max_pages} pages)...")
+
         if not self.is_authenticated:
-            raise RuntimeError("Not authenticated! Call authenticate() first.")
+            logger.error("Not authenticated! Call authenticate() first.")
+            return []
 
-        # Initialize browser NOW (only when needed for data fetching)
-        if self.driver is None:
-            logger.info("🌐 Initializing browser for data fetching...")
-            self._setup_driver()
+        # Ensure we're on Crunchyroll to maintain session context
+        self.driver.get("https://www.crunchyroll.com")
+        time.sleep(2)
 
-            # Apply cached cookies to browser session
-            self._apply_cached_cookies_to_browser()
+        # CRITICAL: Ensure we have valid tokens
+        if not self.access_token or not self.cached_account_id:
+            logger.warning("Missing access_token or account_id - requesting new tokens...")
+            account_id = self._get_account_id()
+            if not account_id:
+                logger.error("Could not get account ID from token endpoint")
+                return []
+        else:
+            # We have cached tokens, but validate they still work
+            logger.info(f"✅ Using cached account ID: {self.cached_account_id[:8]}...")
+            if not self._verify_cached_token():
+                logger.error("Cached token validation failed and refresh failed")
+                return []
+            account_id = self.cached_account_id
 
-        # Rest of the method remains the same...
-        return self._fetch_history_via_browser_api(self.cached_account_id, max_pages)
+        # Fetch history via browser-based API calls
+        return self._fetch_history_via_browser_api(account_id, max_pages)
 
     def _apply_cached_cookies_to_browser(self):
         """NEW METHOD: Apply cached cookies when browser is initialized"""

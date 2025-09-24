@@ -1,5 +1,5 @@
 """
-Enhanced anime title matching with proper season detection and episode validation
+Enhanced anime title matching with proper season detection, episode validation, and movie support
 """
 
 import re
@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 logger = logging.getLogger(__name__)
 
 class AnimeMatcher:
-    """Enhanced anime matcher with AniList-based season validation and episode conversion"""
+    """Enhanced anime matcher with AniList-based season validation, episode conversion, and movie support"""
 
     def __init__(self, similarity_threshold: float = 0.8):
         self.similarity_threshold = similarity_threshold
@@ -30,6 +30,76 @@ class AnimeMatcher:
             'compilation', 'gekijouban', 'theatrical'
         ]
 
+        # Movie format types in AniList
+        self.movie_formats = ['MOVIE', 'SPECIAL', 'OVA', 'ONA']
+
+    def find_best_match_with_season(self, target_title: str, candidates: List[Dict[str, Any]],
+                                   target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int]]:
+        """
+        Find best match with season awareness - FIXED to handle movies (season 0)
+        Returns: (match, similarity, matched_season)
+        """
+        if not target_title or not candidates:
+            return None
+
+        # FIXED: Handle movies (season 0) differently
+        if target_season == 0:
+            return self._find_best_movie_match(target_title, candidates)
+
+        logger.debug(f"Matching '{target_title}' for season {target_season}")
+
+        # First, analyze the title structure in candidates to understand seasons
+        season_structure = self._analyze_season_structure(candidates)
+        logger.debug(f"Season structure detected: {list(season_structure.keys())}")
+
+        # Find the best season match
+        best_match_info = self._find_best_season_match(
+            target_title, candidates, season_structure, target_season
+        )
+
+        if not best_match_info:
+            logger.warning(f"No suitable match found for {target_title} season {target_season}")
+            return None
+
+        match, similarity, season = best_match_info
+
+        anime_title = self._get_primary_title(match)
+        logger.info(f"✅ Matched '{target_title}' to '{anime_title}' S{season} (similarity: {similarity:.2f})")
+
+        return match, similarity, season
+
+    def _find_best_movie_match(self, target_title: str, candidates: List[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], float, int]]:
+        """Find best match for movies/specials (season 0)"""
+        logger.debug(f"Looking for movie match for: {target_title}")
+
+        best_match = None
+        best_similarity = 0.0
+
+        for candidate in candidates:
+            # Check if this is actually a movie/special
+            format_type = (candidate.get('format', '') or '').upper()
+
+            # Prioritize actual movies/specials
+            if format_type in self.movie_formats:
+                similarity = self._calculate_title_similarity(target_title, candidate)
+                # Bonus for being the right format
+                similarity += 0.1
+            else:
+                # Still check regular series in case the movie isn't properly tagged
+                similarity = self._calculate_title_similarity(target_title, candidate)
+
+            if similarity > best_similarity and similarity >= self.similarity_threshold:
+                best_similarity = similarity
+                best_match = candidate
+
+        if best_match:
+            anime_title = self._get_primary_title(best_match)
+            format_type = best_match.get('format', 'Unknown')
+            logger.info(f"🎬 Found movie match: '{anime_title}' ({format_type}) - similarity: {best_similarity:.2f}")
+            return best_match, best_similarity, 0  # Return season 0 for movies
+
+        return None
+
     def find_best_match_with_episode_validation(self, target_title: str, target_episode: int,
                                                candidates: List[Dict[str, Any]],
                                                estimated_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
@@ -38,6 +108,14 @@ class AnimeMatcher:
         Returns: (match, similarity, corrected_season, corrected_episode)
         """
         if not target_title or not candidates:
+            return None
+
+        # FIXED: Handle movies differently
+        if estimated_season == 0:
+            movie_result = self._find_best_movie_match(target_title, candidates)
+            if movie_result:
+                match, similarity, season = movie_result
+                return match, similarity, season, target_episode
             return None
 
         logger.debug(f"Matching '{target_title}' episode {target_episode} (estimated season {estimated_season})")
@@ -86,6 +164,38 @@ class AnimeMatcher:
             }
 
         return season_structure
+
+    def _find_best_season_match(self, target_title: str, candidates: List[Dict[str, Any]],
+                               season_structure: Dict[int, Dict[str, Any]], target_season: int) -> Optional[Tuple[Dict[str, Any], float, int]]:
+        """Find best season match without episode validation"""
+        best_match = None
+        best_similarity = 0.0
+        best_season = 1
+
+        # Sort seasons to check most likely ones first
+        sorted_seasons = sorted(season_structure.keys())
+
+        for season_num, season_info in season_structure.items():
+            candidate = season_info['candidate']
+
+            # Calculate title similarity
+            similarity = self._calculate_title_similarity(target_title, candidate)
+
+            # Apply season preference bonus
+            if season_num == target_season:
+                similarity += 0.1  # Bonus for matching target season
+            elif abs(season_num - target_season) == 1:
+                similarity += 0.05  # Smaller bonus for adjacent seasons
+
+            if similarity > best_similarity and similarity >= self.similarity_threshold:
+                best_similarity = similarity
+                best_match = candidate
+                best_season = season_num
+
+        if best_match:
+            return best_match, best_similarity, best_season
+
+        return None
 
     def _find_best_season_episode_match(self, target_title: str, target_episode: int,
                                       candidates: List[Dict[str, Any]],
@@ -409,21 +519,8 @@ class AnimeMatcher:
     def find_best_match(self, target_title: str, candidates: List[Dict[str, Any]],
                        target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float]]:
         """Legacy compatibility method"""
-        result = self.find_best_match_with_episode_validation(
-            target_title, 1, candidates, target_season
-        )
+        result = self.find_best_match_with_season(target_title, candidates, target_season)
         if result:
-            match, similarity, _, _ = result
+            match, similarity, _ = result
             return match, similarity
-        return None
-
-    def find_best_match_with_season(self, target_title: str, candidates: List[Dict[str, Any]],
-                                   target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int]]:
-        """Legacy compatibility method with season"""
-        result = self.find_best_match_with_episode_validation(
-            target_title, 1, candidates, target_season
-        )
-        if result:
-            match, similarity, season, _ = result
-            return match, similarity, season
         return None

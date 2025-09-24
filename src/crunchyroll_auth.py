@@ -24,16 +24,15 @@ class CrunchyrollAuth:
     # ==================== AUTHENTICATION METHODS ====================
 
     def _verify_cached_token(self) -> bool:
-        """Verify that cached access token is still valid"""
-        if self.driver is None:
-            # If no browser initialized yet, can't use this method
+        """Verify that cached access token is still valid, refresh if needed"""
+        if not self.access_token or not self.cached_account_id:
+            logger.debug("No cached token to verify")
             return False
 
         try:
-            if not self.access_token or not self.cached_account_id:
-                return False
+            logger.debug("Verifying cached access token...")
 
-            # Make a simple API call to verify token validity
+            # Test the cached token with a simple API call
             test_response = self.driver.execute_script("""
                 const accessToken = arguments[0];
                 const accountId = arguments[1];
@@ -64,12 +63,14 @@ class CrunchyrollAuth:
                 logger.debug("✅ Cached token is valid")
                 return True
             else:
-                logger.debug(f"❌ Cached token invalid: {test_response}")
-                return False
+                logger.info(f"❌ Cached token invalid (status: {test_response.get('status', 'unknown')}), refreshing...")
+
+                # Try to refresh the token
+                return self._refresh_access_token()
 
         except Exception as e:
             logger.debug(f"Error verifying cached token: {e}")
-            return False
+            return self._refresh_access_token()
 
     def _setup_driver(self) -> None:
         """Initialize Chrome driver with appropriate options"""
@@ -101,7 +102,7 @@ class CrunchyrollAuth:
             raise
 
     def _try_cached_auth(self) -> bool:
-        """Load and apply cached authentication cookies and tokens"""
+        """Load and apply cached authentication cookies and tokens with validation"""
         cached_auth = self.auth_cache.load_crunchyroll_auth()
         if not cached_auth:
             return False
@@ -135,13 +136,14 @@ class CrunchyrollAuth:
                     logger.debug(f"Failed to add cookie {cookie.get('name')}: {e}")
                     continue
 
-            # Load cached access_token and device_id if available
+            # Load cached access_token and account_id
             self.access_token = cached_auth.get('access_token')
             self.cached_account_id = cached_auth.get('account_id')
             self.cached_device_id = cached_auth.get('device_id')
 
+            # Log what we loaded for debugging
             if self.access_token and self.cached_account_id:
-                logger.info("✅ Cached access token and account ID loaded")
+                logger.info(f"✅ Cached access token and account ID loaded: {self.cached_account_id[:8]}...")
             else:
                 logger.debug("No cached access token/account ID found")
 
@@ -153,10 +155,11 @@ class CrunchyrollAuth:
             return False
 
     def _verify_authentication(self) -> bool:
-        """Verify that authentication is working by checking account page"""
+        """Verify that authentication is working by checking account page AND validating token"""
         try:
             logger.info("🔍 Verifying authentication...")
 
+            # Step 1: Check account page access (existing verification)
             self.driver.get("https://www.crunchyroll.com/account")
             time.sleep(3)
 
@@ -175,15 +178,82 @@ class CrunchyrollAuth:
             indicators_found = [indicator for indicator in logged_in_indicators
                                 if indicator in page_source]
 
-            if indicators_found:
-                logger.info(f"✅ Authentication verified - found indicators: {indicators_found}")
-                return True
-            else:
+            if not indicators_found:
                 logger.info("❌ No logged-in indicators found")
                 return False
 
+            logger.info(f"✅ Account access verified - found indicators: {indicators_found}")
+
+            # Step 2: Validate API token if we have one
+            if self.access_token and self.cached_account_id:
+                logger.info("🔍 Validating API access token...")
+                if not self._verify_cached_token():
+                    logger.warning("⚠️ Account access works but API token is invalid")
+                    return False
+                logger.info("✅ API access token validated")
+            else:
+                logger.info("ℹ️ No API token to validate (will be requested when needed)")
+
+            return True
+
         except Exception as e:
             logger.error(f"Error verifying authentication: {e}")
+            return False
+
+    def _refresh_access_token(self) -> bool:
+        """Refresh expired access token using current browser session"""
+        try:
+            logger.info("🔄 Refreshing access token...")
+
+            # Generate or get device ID
+            device_id = self._get_or_create_device_id()
+
+            # Make token request via browser JavaScript (maintains session context)
+            token_response = self.driver.execute_script("""
+                const deviceId = arguments[0];
+
+                return fetch("https://www.crunchyroll.com/auth/v1/token", {
+                    method: "POST",
+                    headers: {
+                        "accept": "*/*",
+                        "accept-language": "en-US,en;q=0.9",
+                        "authorization": "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "sec-fetch-dest": "empty",
+                        "sec-fetch-mode": "cors",
+                        "sec-fetch-site": "same-origin"
+                    },
+                    body: `device_id=${deviceId}&device_type=Chrome&grant_type=etp_rt_cookie`,
+                    mode: "cors",
+                    credentials: "include"
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return { success: false, status: response.status };
+                    }
+                    return response.json().then(data => ({ success: true, data: data }));
+                })
+                .catch(error => ({ success: false, error: error.message }));
+            """, device_id)
+
+            if token_response and token_response.get('success'):
+                data = token_response.get('data', {})
+                self.access_token = data.get('access_token')
+                self.cached_account_id = data.get('account_id')
+                self.cached_device_id = device_id
+
+                logger.info("✅ Access token refreshed successfully")
+
+                # Update the cache with new token
+                self._cache_authentication()
+
+                return True
+            else:
+                logger.error(f"❌ Token refresh failed: {token_response}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error refreshing access token: {e}")
             return False
 
     def _perform_fresh_authentication(self) -> bool:
