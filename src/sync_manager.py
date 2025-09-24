@@ -121,7 +121,7 @@ class SyncManager:
                 logger.warning("⚠️ No watch history found")
                 return True  # Not necessarily an error
 
-            logger.info(f"✅ Found {len(self.watch_history)} episodes in watch history")
+            #logger.info(f"✅ Found {len(self.watch_history)} episodes in watch history")
 
             # Enhanced debug data saving
             if self.config.get('debug'):
@@ -141,7 +141,7 @@ class SyncManager:
         if not self.watch_history:
             return
 
-        logger.info("📋 Sample of detected episodes (first 10):")
+        '''logger.info("📋 Sample of detected episodes (first 10):")
         sample_size = min(10, len(self.watch_history))
 
         for i, episode in enumerate(self.watch_history[:sample_size]):
@@ -153,7 +153,7 @@ class SyncManager:
             logger.info(f"  {i+1:2d}. {series_title} - S{season} E{episode_number}")
 
         if len(self.watch_history) > sample_size:
-            logger.info(f"  ... and {len(self.watch_history) - sample_size} more episodes")
+            logger.info(f"  ... and {len(self.watch_history) - sample_size} more episodes")'''
 
     def _update_anilist_progress_with_seasons(self) -> bool:
         """Enhanced progress update with season awareness and improved logging"""
@@ -257,7 +257,7 @@ class SyncManager:
         logger.info(f"✅ Processed {processed_count} episodes, skipped {skipped_count}, converted {conversion_count}")
 
         # IMPROVED: Show detailed episode breakdown per series
-        logger.info(f"📊 Detailed episode breakdown:")
+        '''logger.info(f"📊 Detailed episode breakdown:")
         for series_season, episode_list in series_episode_counts.items():
             episode_range = f"E{min(episode_list)}-E{max(episode_list)}" if len(
                 episode_list) > 1 else f"E{episode_list[0]}"
@@ -265,7 +265,7 @@ class SyncManager:
 
         logger.info(f"📊 Final series-season progress (latest episodes only):")
         for i, ((series, season), episode) in enumerate(sorted(series_season_progress.items()), 1):
-            logger.info(f"  {i:2d}. {series} (Season {season}) - Latest: Episode {episode}")
+            logger.info(f"  {i:2d}. {series} (Season {season}) - Latest: Episode {episode}")'''
 
         return series_season_progress
 
@@ -438,7 +438,7 @@ class SyncManager:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
 
-            logger.debug(f"💾 Enhanced debug data saved: {filepath}")
+            #logger.debug(f"💾 Enhanced debug data saved: {filepath}")
 
             # Also save a summary for easier review
             if isinstance(data, list) and data and isinstance(data[0], dict):
@@ -457,7 +457,7 @@ class SyncManager:
                 with open(summary_file, 'w', encoding='utf-8') as f:
                     json.dump(summary, f, indent=2, ensure_ascii=False)
 
-                logger.debug(f"📋 Summary saved: {summary_file}")
+                #logger.debug(f"📋 Summary saved: {summary_file}")
 
         except Exception as e:
             logger.error(f"Failed to save enhanced debug data: {e}")

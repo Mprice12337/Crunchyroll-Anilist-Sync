@@ -159,8 +159,8 @@ class CrunchyrollParser:
             return 0  # Use 0 to indicate movie/special
 
         # Primary: Use season_display_number if available and numeric
-        season_display_number = episode_metadata.get('season_display_number', '').strip()
-        '''logger.debug(f"extract_correct_season_number - Input season_display_number: {season_display_number!r}")'''
+        '''season_display_number = episode_metadata.get('season_display_number', '').strip()
+        logger.debug(f"extract_correct_season_number - Input season_display_number: {season_display_number!r}")
 
         if season_display_number and season_display_number.isdigit():
             try:
@@ -168,12 +168,12 @@ class CrunchyrollParser:
                 if 1 <= season_num <= 20:  # Reasonable range
                     logger.debug(f"Using season_display_number: {season_num}")
                     return season_num
-                '''else:
-                    logger.debug(f"season_display_number {season_num} out of reasonable range, falling back")'''
+                else:
+                    logger.debug(f"season_display_number {season_num} out of reasonable range, falling back")
             except ValueError:
                 logger.debug(f"Could not convert season_display_number '{season_display_number}' to int")
         else:
-            logger.debug(f"season_display_number is empty or non-numeric: {season_display_number!r}")
+            logger.debug(f"season_display_number is empty or non-numeric: {season_display_number!r}")'''
 
         # Secondary: Parse season number from season_title
         season_title = episode_metadata.get('season_title', '')
