@@ -1,5 +1,5 @@
 """
-Enhanced anime title matching with proper season detection, episode validation, and movie support
+Enhanced anime title matching with dynamic season detection
 """
 
 import re
@@ -10,25 +10,10 @@ from difflib import SequenceMatcher
 logger = logging.getLogger(__name__)
 
 class AnimeMatcher:
-    """Enhanced anime matcher with AniList-based season validation, episode conversion, and movie support"""
+    """Dynamic anime matcher without hardcoded data"""
 
     def __init__(self, similarity_threshold: float = 0.8):
         self.similarity_threshold = similarity_threshold
-
-        # Season detection patterns - more conservative
-        self.season_patterns = [
-            r'Season[\s]*(\d+)',  # Season 2
-            r'S(\d+)',  # S2
-            r'(\d+)(?:st|nd|rd|th)?\s*Season',  # 2nd Season
-            r'Part[\s]*(\d+)',  # Part 2
-            r'Cour[\s]*(\d+)',  # Cour 2
-        ]
-
-        # Special/movie indicators
-        self.special_indicators = [
-            'movie', 'film', 'ova', 'ona', 'special', 'recap', 'summary',
-            'compilation', 'gekijouban', 'theatrical'
-        ]
 
         # Movie format types in AniList
         self.movie_formats = ['MOVIE', 'SPECIAL', 'OVA', 'ONA']
@@ -36,59 +21,78 @@ class AnimeMatcher:
     def find_best_match_with_season(self, target_title: str, candidates: List[Dict[str, Any]],
                                    target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int]]:
         """
-        Find best match with season awareness - FIXED to handle movies (season 0)
+        Find best match with season awareness
         Returns: (match, similarity, matched_season)
         """
         if not target_title or not candidates:
             return None
 
-        # FIXED: Handle movies (season 0) differently
+        # Handle movies (season 0) differently
         if target_season == 0:
             return self._find_best_movie_match(target_title, candidates)
 
         logger.debug(f"Matching '{target_title}' for season {target_season}")
 
-        # First, analyze the title structure in candidates to understand seasons
-        season_structure = self._analyze_season_structure(candidates)
-        logger.debug(f"Season structure detected: {list(season_structure.keys())}")
+        best_match = None
+        best_similarity = 0.0
+        best_season = target_season
 
-        # Find the best season match
-        best_match_info = self._find_best_season_match(
-            target_title, candidates, season_structure, target_season
-        )
+        # Clean target for better matching
+        base_title = self._extract_base_title(target_title)
 
-        if not best_match_info:
-            logger.warning(f"No suitable match found for {target_title} season {target_season}")
-            return None
+        for candidate in candidates:
+            # Skip movies for regular matching
+            format_type = (candidate.get('format', '') or '').upper()
+            if format_type in self.movie_formats:
+                continue
 
-        match, similarity, season = best_match_info
+            # Calculate similarity
+            similarity = self._calculate_title_similarity(target_title, candidate)
 
-        anime_title = self._get_primary_title(match)
-        logger.info(f"✅ Matched '{target_title}' to '{anime_title}' S{season} (similarity: {similarity:.2f})")
+            # Detect season from candidate
+            detected_season = self._detect_season_from_entry(candidate)
 
-        return match, similarity, season
+            # Bonus for matching target season
+            if detected_season == target_season:
+                similarity += 0.1
+
+            # Update best match if this is better
+            if similarity > best_similarity and similarity >= self.similarity_threshold:
+                best_similarity = similarity
+                best_match = candidate
+                best_season = detected_season
+
+        if best_match:
+            anime_title = self._get_primary_title(best_match)
+            logger.info(f"✅ Matched '{target_title}' to '{anime_title}' S{best_season} (similarity: {best_similarity:.2f})")
+            return best_match, best_similarity, best_season
+
+        return None
 
     def _find_best_movie_match(self, target_title: str, candidates: List[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], float, int]]:
-        """Find best match for movies/specials (season 0)"""
+        """Find best match for movies/specials"""
         logger.debug(f"Looking for movie match for: {target_title}")
+
+        # Clean the target title
+        clean_target = re.sub(r'\s*-?\s*movie\s*', '', target_title, flags=re.IGNORECASE)
+        clean_target = re.sub(r'\s*-?\s*0\s*$', '', clean_target)
 
         best_match = None
         best_similarity = 0.0
 
         for candidate in candidates:
-            # Check if this is actually a movie/special
+            # Only consider actual movies/specials
             format_type = (candidate.get('format', '') or '').upper()
+            if format_type not in self.movie_formats:
+                continue
 
-            # Prioritize actual movies/specials
-            if format_type in self.movie_formats:
-                similarity = self._calculate_title_similarity(target_title, candidate)
-                # Bonus for being the right format
-                similarity += 0.1
-            else:
-                # Still check regular series in case the movie isn't properly tagged
-                similarity = self._calculate_title_similarity(target_title, candidate)
+            similarity = self._calculate_title_similarity(clean_target, candidate)
 
-            if similarity > best_similarity and similarity >= self.similarity_threshold:
+            # Small bonus for movie format
+            if format_type == 'MOVIE':
+                similarity += 0.05
+
+            if similarity > best_similarity and similarity >= 0.85:
                 best_similarity = similarity
                 best_match = candidate
 
@@ -96,249 +100,68 @@ class AnimeMatcher:
             anime_title = self._get_primary_title(best_match)
             format_type = best_match.get('format', 'Unknown')
             logger.info(f"🎬 Found movie match: '{anime_title}' ({format_type}) - similarity: {best_similarity:.2f}")
-            return best_match, best_similarity, 0  # Return season 0 for movies
+            return best_match, best_similarity, 0
 
         return None
 
-    def find_best_match_with_episode_validation(self, target_title: str, target_episode: int,
-                                               candidates: List[Dict[str, Any]],
-                                               estimated_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
-        """
-        Find best match with episode validation and proper season detection
-        Returns: (match, similarity, corrected_season, corrected_episode)
-        """
-        if not target_title or not candidates:
-            return None
+    def _detect_season_from_entry(self, entry: Dict) -> int:
+        """Detect season number from AniList entry"""
+        import re
 
-        # FIXED: Handle movies differently
-        if estimated_season == 0:
-            movie_result = self._find_best_movie_match(target_title, candidates)
-            if movie_result:
-                match, similarity, season = movie_result
-                return match, similarity, season, target_episode
-            return None
+        title_obj = entry.get('title', {})
+        romaji = title_obj.get('romaji', '')
+        english = title_obj.get('english', '')
 
-        logger.debug(f"Matching '{target_title}' episode {target_episode} (estimated season {estimated_season})")
+        # Check both titles for season indicators
+        for title in [romaji, english]:
+            if not title:
+                continue
 
-        # First, analyze the title structure in candidates to understand seasons
-        season_structure = self._analyze_season_structure(candidates)
-        logger.debug(f"Season structure detected: {list(season_structure.keys())}")
+            # Season patterns
+            patterns = [
+                (r'(\d+)(?:st|nd|rd|th)\s+Season', lambda m: int(m.group(1))),
+                (r'Season\s+(\d+)', lambda m: int(m.group(1))),
+                (r'\bPart\s+(\d+)', lambda m: int(m.group(1))),
+                (r'\b(II|III|IV|V|VI)\b', self._roman_to_int),
+            ]
 
-        # Determine the most likely season and episode based on episode number and AniList data
-        best_match_info = self._find_best_season_episode_match(
-            target_title, target_episode, candidates, season_structure, estimated_season
-        )
-
-        if not best_match_info:
-            logger.warning(f"No suitable match found for {target_title} episode {target_episode}")
-            return None
-
-        match, similarity, season, episode = best_match_info
-
-        anime_title = self._get_primary_title(match)
-        logger.info(f"✅ Matched '{target_title}' E{target_episode} to '{anime_title}' S{season} E{episode} (similarity: {similarity:.2f})")
-
-        return match, similarity, season, episode
-
-    def _analyze_season_structure(self, candidates: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-        """Analyze AniList candidates to understand season structure"""
-        season_structure = {}
-
-        for candidate in candidates:
-            # Extract season number from title and data
-            season_num = self._extract_season_from_candidate(candidate)
-
-            # Get episode count
-            episode_count = candidate.get('episodes') or 12  # Default fallback
-
-            # Get format to identify specials/movies - FIX: Handle None values properly
-            format_value = candidate.get('format')
-            format_type = (format_value or '').upper()
-
-            season_structure[season_num] = {
-                'candidate': candidate,
-                'episode_count': episode_count,
-                'format': format_type,
-                'is_special': format_type in ['MOVIE', 'SPECIAL', 'OVA', 'ONA'],
-                'title': self._get_primary_title(candidate)
-            }
-
-        return season_structure
-
-    def _find_best_season_match(self, target_title: str, candidates: List[Dict[str, Any]],
-                               season_structure: Dict[int, Dict[str, Any]], target_season: int) -> Optional[Tuple[Dict[str, Any], float, int]]:
-        """Find best season match without episode validation"""
-        best_match = None
-        best_similarity = 0.0
-        best_season = 1
-
-        # Sort seasons to check most likely ones first
-        sorted_seasons = sorted(season_structure.keys())
-
-        for season_num, season_info in season_structure.items():
-            candidate = season_info['candidate']
-
-            # Calculate title similarity
-            similarity = self._calculate_title_similarity(target_title, candidate)
-
-            # Apply season preference bonus
-            if season_num == target_season:
-                similarity += 0.1  # Bonus for matching target season
-            elif abs(season_num - target_season) == 1:
-                similarity += 0.05  # Smaller bonus for adjacent seasons
-
-            if similarity > best_similarity and similarity >= self.similarity_threshold:
-                best_similarity = similarity
-                best_match = candidate
-                best_season = season_num
-
-        if best_match:
-            return best_match, best_similarity, best_season
-
-        return None
-
-    def _find_best_season_episode_match(self, target_title: str, target_episode: int,
-                                      candidates: List[Dict[str, Any]],
-                                      season_structure: Dict[int, Dict[str, Any]],
-                                      estimated_season: int) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
-        """Find the best season and episode match using AniList data"""
-
-        best_match = None
-        best_similarity = 0.0
-        best_season = 1
-        best_episode = target_episode
-
-        # Sort seasons to check most likely ones first
-        sorted_seasons = sorted(season_structure.keys())
-
-        # If we have multiple seasons, try to determine which one based on episode number
-        if len(sorted_seasons) > 1:
-            # Calculate cumulative episode counts to determine season
-            cumulative_episodes = 0
-            target_season = 1
-            target_episode_in_season = target_episode
-
-            for season_num in sorted_seasons:
-                season_info = season_structure[season_num]
-                episode_count = season_info['episode_count']
-
-                # Skip specials when calculating cumulative episodes
-                if season_info['is_special']:
-                    continue
-
-                if target_episode <= cumulative_episodes + episode_count:
-                    target_season = season_num
-                    target_episode_in_season = target_episode - cumulative_episodes
-                    break
-
-                cumulative_episodes += episode_count
-
-            logger.debug(f"Calculated season {target_season} episode {target_episode_in_season} from absolute episode {target_episode}")
-
-        else:
-            # Only one season available
-            target_season = sorted_seasons[0] if sorted_seasons else 1
-            target_episode_in_season = target_episode
-
-        # Now find the best matching candidate for our determined season
-        for season_num, season_info in season_structure.items():
-            candidate = season_info['candidate']
-
-            # Calculate title similarity
-            similarity = self._calculate_title_similarity(target_title, candidate)
-
-            # Apply season preference bonus
-            if season_num == target_season:
-                similarity += 0.1  # Bonus for calculated season
-            elif season_num == estimated_season:
-                similarity += 0.05  # Smaller bonus for estimated season
-
-            # Validate episode number makes sense for this season
-            episode_count = season_info['episode_count']
-            episode_in_season = target_episode_in_season if season_num == target_season else target_episode
-
-            # Penalty for impossible episode numbers
-            if episode_count and episode_in_season > episode_count * 1.5:  # Allow some flexibility
-                similarity -= 0.2
-                logger.debug(f"Episode penalty for {season_info['title']} S{season_num}: E{episode_in_season} > {episode_count}")
-
-            if similarity > best_similarity and similarity >= self.similarity_threshold:
-                best_similarity = similarity
-                best_match = candidate
-                best_season = season_num
-                # Use corrected episode number for the determined season
-                best_episode = target_episode_in_season if season_num == target_season else min(target_episode, episode_count or target_episode)
-
-        if best_match:
-            return best_match, best_similarity, best_season, best_episode
-
-        return None
-
-    def _extract_season_from_candidate(self, candidate: Dict[str, Any]) -> int:
-        """Extract season number from AniList candidate with better detection"""
-
-        # Check title fields for season information
-        titles_to_check = self._extract_titles(candidate)
-
-        for title in titles_to_check:
-            season = self._extract_season_from_title(title)
-            if season > 1:
-                return season
-
-        # Check for season indicators in title
-        primary_title = self._get_primary_title(candidate).lower()
-
-        # Common season indicators
-        season_indicators = {
-            '2nd': 2, 'second': 2, 'ii': 2,
-            '3rd': 3, 'third': 3, 'iii': 3,
-            '4th': 4, 'fourth': 4, 'iv': 4,
-            '5th': 5, 'fifth': 5, 'v': 5,
-        }
-
-        for indicator, season_num in season_indicators.items():
-            if indicator in primary_title:
-                return season_num
-
-        # Check start date to infer season order (newer = higher season)
-        start_date = candidate.get('startDate', {})
-        if start_date and start_date.get('year'):
-            year = start_date['year']
-            # This is a rough heuristic - later years might indicate later seasons
-            # But we need more context to be accurate
+            for pattern, extractor in patterns:
+                match = re.search(pattern, title, re.IGNORECASE)
+                if match:
+                    season = extractor(match)
+                    if 1 <= season <= 10:
+                        return season
 
         return 1  # Default to season 1
 
-    def _extract_season_from_title(self, title: str) -> int:
-        """Extract season number from title with improved patterns"""
-        if not title:
-            return 1
+    def _roman_to_int(self, match) -> int:
+        """Convert Roman numerals to integers"""
+        roman_map = {'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6}
+        return roman_map.get(match.group(1), 1)
 
-        # More specific patterns that are less likely to give false positives
-        specific_patterns = [
-            r'Season[\s]*(\d+)',  # Season 2
-            r'(\d+)(?:st|nd|rd|th)?\s*Season',  # 2nd Season
-            r'\bS(\d+)\b',  # S2 (word boundary to avoid false matches)
-            r'Part[\s]*(\d+)',  # Part 2
-            r'Cour[\s]*(\d+)',  # Cour 2
+    def _extract_base_title(self, title: str) -> str:
+        """Extract base title without season indicators"""
+        base = title
+
+        # Remove season indicators
+        patterns_to_remove = [
+            r'Season\s*\d+',
+            r'\d+(?:st|nd|rd|th)?\s*Season',
+            r'\bS\d+\b',
+            r'Part\s*\d+',
+            r'\b(?:II|III|IV|V|VI)\b',
+            r'\s+\d+$',  # Trailing numbers
         ]
 
-        for pattern in specific_patterns:
-            match = re.search(pattern, title, re.IGNORECASE)
-            if match:
-                try:
-                    season_num = int(match.group(1))
-                    # Sanity check - seasons should be reasonable
-                    if 1 <= season_num <= 10:  # Most anime don't have more than 10 seasons
-                        return season_num
-                except (ValueError, IndexError):
-                    continue
+        for pattern in patterns_to_remove:
+            base = re.sub(pattern, '', base, flags=re.IGNORECASE)
 
-        return 1
+        return base.strip()
 
     def _calculate_title_similarity(self, target_title: str, candidate: Dict[str, Any]) -> float:
         """Calculate similarity between target title and candidate"""
         target_normalized = self._normalize_title(target_title)
+        target_base = self._extract_base_title(target_normalized)
 
         max_similarity = 0.0
         titles_to_check = self._extract_titles(candidate)
@@ -346,79 +169,57 @@ class AnimeMatcher:
         for title in titles_to_check:
             if title:
                 candidate_normalized = self._normalize_title(title)
-                similarity = self._calculate_similarity(target_normalized, candidate_normalized)
-                max_similarity = max(max_similarity, similarity)
+                candidate_base = self._extract_base_title(candidate_normalized)
+
+                # Compare both full and base titles
+                full_similarity = self._calculate_string_similarity(target_normalized, candidate_normalized)
+                base_similarity = self._calculate_string_similarity(target_base, candidate_base)
+
+                # Weight base similarity higher for series matching
+                combined_similarity = (base_similarity * 0.7) + (full_similarity * 0.3)
+                max_similarity = max(max_similarity, combined_similarity)
 
         return max_similarity
 
-    def validate_episode_number(self, episode_number: int, anime_data: Dict[str, Any]) -> Tuple[int, bool, str]:
-        """Validate and potentially correct episode number based on AniList data"""
-        total_episodes = anime_data.get('episodes')
+    def _calculate_string_similarity(self, str1: str, str2: str) -> float:
+        """Calculate similarity between two strings"""
+        if not str1 or not str2:
+            return 0.0
 
-        if not total_episodes:
-            return episode_number, False, "No episode count available"
+        # Exact match
+        if str1 == str2:
+            return 1.0
 
-        # If episode is within range, it's probably correct
-        if episode_number <= total_episodes:
-            return episode_number, False, f"Episode {episode_number} is within range (≤{total_episodes})"
+        # Substring matches
+        if str1 in str2 or str2 in str1:
+            shorter, longer = (str1, str2) if len(str1) < len(str2) else (str2, str1)
+            return max(0.9, len(shorter) / len(longer))
 
-        # Episode number is too high - might be absolute numbering
-        if episode_number > total_episodes:
-            # Try to convert from absolute to seasonal numbering
-            # This is a simplified approach - in reality, you'd need season structure
-            if episode_number <= total_episodes * 2:  # Might be from previous season
-                corrected = episode_number - total_episodes
-                if corrected > 0:
-                    return corrected, True, f"Converted from absolute numbering (E{episode_number} → E{corrected})"
+        # Fuzzy matching
+        sequence_similarity = SequenceMatcher(None, str1, str2).ratio()
 
-        # Keep original if we can't confidently convert
-        return episode_number, False, f"Keeping original E{episode_number} (outside expected range of 1-{total_episodes})"
+        # Word-based similarity
+        words1 = set(str1.split())
+        words2 = set(str2.split())
 
-    def convert_absolute_to_seasonal_episode(self, absolute_episode: int,
-                                           season_structure: Dict[int, Dict[str, Any]],
-                                           target_season: int) -> Tuple[int, str]:
-        """Convert absolute episode number to seasonal episode number"""
+        if words1 and words2:
+            common_words = words1.intersection(words2)
+            total_words = words1.union(words2)
 
-        if target_season == 1:
-            return absolute_episode, "No conversion needed for season 1"
+            if total_words:
+                word_overlap = len(common_words) / len(total_words)
+                coverage1 = len(common_words) / len(words1)
+                coverage2 = len(common_words) / len(words2)
+                word_coverage = (coverage1 + coverage2) / 2
 
-        # Calculate episodes in previous seasons
-        previous_episodes = 0
-        for season_num in sorted(season_structure.keys()):
-            if season_num >= target_season:
-                break
-            season_info = season_structure[season_num]
-            if not season_info['is_special']:  # Don't count specials
-                previous_episodes += season_info['episode_count']
-
-        seasonal_episode = absolute_episode - previous_episodes
-
-        if seasonal_episode > 0:
-            return seasonal_episode, f"Converted from absolute E{absolute_episode} (removed {previous_episodes} previous episodes)"
+                word_similarity = (word_overlap * 0.4) + (word_coverage * 0.6)
+                final_similarity = (sequence_similarity * 0.6) + (word_similarity * 0.4)
+            else:
+                final_similarity = sequence_similarity
         else:
-            return absolute_episode, f"Conversion failed, keeping absolute E{absolute_episode}"
+            final_similarity = sequence_similarity
 
-    def detect_special_or_movie(self, title: str, episode_data: Dict[str, Any]) -> bool:
-        """Detect if this is a special, OVA, or movie rather than regular episode"""
-
-        title_lower = title.lower()
-        episode_title = episode_data.get('episode_title', '').lower()
-
-        # Check for special indicators in titles
-        for indicator in self.special_indicators:
-            if indicator in title_lower or indicator in episode_title:
-                return True
-
-        # Check episode number patterns that might indicate specials
-        episode_number = episode_data.get('episode_number', 0)
-
-        # Episode 0 often indicates specials
-        if episode_number == 0:
-            return True
-
-        return False
-
-    # Utility methods (cleaned up versions of existing methods)
+        return final_similarity
 
     def _extract_titles(self, anime: Dict[str, Any]) -> List[str]:
         """Extract all possible titles from anime data"""
@@ -433,7 +234,7 @@ class AnimeMatcher:
         elif isinstance(title_obj, str):
             titles.append(title_obj)
 
-        # Add synonyms
+        # Add synonyms if available
         synonyms = anime.get('synonyms', [])
         if synonyms:
             titles.extend(synonyms)
@@ -458,64 +259,23 @@ class AnimeMatcher:
 
         normalized = title.lower()
 
-        # Remove common metadata that might interfere with matching
+        # Remove common metadata
         patterns_to_remove = [
             r'\s*\(dub\)\s*',
             r'\s*\(sub\)\s*',
-            r'\s*\(english dub\)\s*',
-            r'\s*\(\d{4}\)\s*$',  # Year in parentheses at end
+            r'\s*\(\d{4}\)\s*$',  # Year
+            r'[^\w\s\-:!?]',  # Special characters
         ]
 
         for pattern in patterns_to_remove:
             normalized = re.sub(pattern, ' ', normalized)
-
-        # Remove special characters but keep important ones
-        normalized = re.sub(r'[^\w\s\-:!?]', ' ', normalized)
 
         # Normalize whitespace
         normalized = re.sub(r'\s+', ' ', normalized).strip()
 
         return normalized
 
-    def _calculate_similarity(self, title1: str, title2: str) -> float:
-        """Calculate similarity between two normalized titles"""
-        if not title1 or not title2:
-            return 0.0
-
-        # Exact match
-        if title1 == title2:
-            return 1.0
-
-        # Substring matches
-        if title1 in title2 or title2 in title1:
-            shorter, longer = (title1, title2) if len(title1) < len(title2) else (title2, title1)
-            return max(0.9, len(shorter) / len(longer))
-
-        # Sequence matcher for fuzzy matching
-        sequence_similarity = SequenceMatcher(None, title1, title2).ratio()
-
-        # Word-based similarity
-        words1 = set(title1.split())
-        words2 = set(title2.split())
-
-        if words1 and words2:
-            common_words = words1.intersection(words2)
-            total_words = words1.union(words2)
-            word_overlap = len(common_words) / len(total_words) if total_words else 0
-
-            coverage1 = len(common_words) / len(words1) if words1 else 0
-            coverage2 = len(common_words) / len(words2) if words2 else 0
-            word_coverage = (coverage1 + coverage2) / 2
-
-            word_similarity = (word_overlap * 0.4) + (word_coverage * 0.6)
-            final_similarity = (sequence_similarity * 0.6) + (word_similarity * 0.4)
-        else:
-            final_similarity = sequence_similarity
-
-        return final_similarity
-
-    # Legacy compatibility methods
-
+    # Backward compatibility methods
     def find_best_match(self, target_title: str, candidates: List[Dict[str, Any]],
                        target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float]]:
         """Legacy compatibility method"""
@@ -523,4 +283,14 @@ class AnimeMatcher:
         if result:
             match, similarity, _ = result
             return match, similarity
+        return None
+
+    def find_best_match_with_episode_validation(self, target_title: str, target_episode: int,
+                                               candidates: List[Dict[str, Any]],
+                                               estimated_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
+        """Legacy compatibility with episode validation"""
+        result = self.find_best_match_with_season(target_title, candidates, estimated_season)
+        if result:
+            match, similarity, season = result
+            return match, similarity, season, target_episode
         return None
