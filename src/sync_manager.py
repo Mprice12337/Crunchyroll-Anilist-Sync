@@ -298,11 +298,20 @@ class SyncManager:
         clean_title = self._clean_title_for_search(series_title)
 
         # Search with the clean title
-        results = self.anilist_client.search_anime(clean_title)
+        results = self.anilist_client.search_anime(series_title)
 
         if not results:
             # Try with original title if clean title didn't work
             results = self.anilist_client.search_anime(series_title)
+
+        # FIX for DAN DA DAN: Try removing spaces if no results
+        if not results:
+            # Try with spaces removed (e.g., "DAN DA DAN" -> "DANDADAN")
+            no_space_title = series_title.replace(' ', '')
+            if no_space_title != series_title:
+                results = self.anilist_client.search_anime(no_space_title)
+                if results:
+                    logger.debug(f"Found results by removing spaces: {no_space_title}")
 
         return results
 
@@ -511,6 +520,21 @@ class SyncManager:
         """Process movie entries with better title matching"""
         try:
             logger.info(f"🎬 Processing movie: {series_title}")
+
+            # FIX: Skip compilation/recap content entirely
+            if episode_data:
+                episode_title = episode_data.get('episode_title', '').strip()
+                season_title = episode_data.get('season_title', '').strip()
+
+                # Check if this is compilation/recap content that should be skipped
+                skip_indicators = ['compilation', 'recap', 'summary', 'highlight', 'digest']
+                combined_title = f"{episode_title} {season_title}".lower()
+
+                for indicator in skip_indicators:
+                    if indicator in combined_title:
+                        logger.info(f"⏭️ Skipping compilation/recap content: {series_title} - {season_title}")
+                        self.sync_results['movies_skipped'] += 1
+                        return False
 
             # FIX 2: Use episode_title and season_title for better movie matching
             search_queries = []
