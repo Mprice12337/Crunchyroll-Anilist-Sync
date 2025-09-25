@@ -1,5 +1,5 @@
 """
-Enhanced sync manager with dynamic AniList validation and intelligent episode conversion
+Enhanced sync manager with fixes for movie matching and series search
 """
 
 import logging
@@ -53,6 +53,9 @@ class SyncManager:
 
         # Cache for anime season structures (temporary, per run)
         self.season_structure_cache = {}
+
+        # Store original episode data for movie processing
+        self.episode_data_cache = {}
 
     def run_sync(self) -> bool:
         """Execute the enhanced sync process"""
@@ -133,7 +136,7 @@ class SyncManager:
             logger.info("No episodes to process")
             return True
 
-        # Group episodes by series and season
+        # Group episodes by series and season, but keep original episode data
         series_progress = self._group_episodes_by_series_and_season(self.watch_history)
 
         logger.info(f"Processing {len(series_progress)} unique series-season combinations...")
@@ -174,6 +177,8 @@ class SyncManager:
             if is_movie:
                 key = (series_title, 0)
                 series_season_progress[key] = 1
+                # Store the full episode data for movies
+                self.episode_data_cache[key] = episode
             elif episode_number > 0:
                 key = (series_title, season)
                 # Keep highest episode for each series-season
@@ -188,12 +193,38 @@ class SyncManager:
 
         # Handle movies separately
         if cr_season == 0:
-            return self._process_movie(series_title)
+            # Get the full episode data for this movie
+            episode_data = self.episode_data_cache.get((series_title, 0), {})
+            return self._process_movie(series_title, episode_data)
 
         try:
-            # Search for the anime on AniList (get all related entries)
+            # FIX 1: Try with season info first for better matching
             logger.info(f"🔍 Searching AniList for: {series_title}")
-            search_results = self._search_anime_comprehensive(series_title)
+
+            # First try with season information for specific match
+            search_with_season = f"{series_title} season {cr_season}" if cr_season > 1 else series_title
+            specific_results = self._search_anime_comprehensive(search_with_season)
+
+            # Also get all related entries without season
+            all_results = self._search_anime_comprehensive(series_title)
+
+            # Combine results, prioritizing specific matches
+            search_results = []
+            seen_ids = set()
+
+            # Add specific results first
+            if specific_results:
+                for result in specific_results:
+                    if result['id'] not in seen_ids:
+                        search_results.append(result)
+                        seen_ids.add(result['id'])
+
+            # Add remaining results
+            if all_results:
+                for result in all_results:
+                    if result['id'] not in seen_ids:
+                        search_results.append(result)
+                        seen_ids.add(result['id'])
 
             if not search_results:
                 logger.warning(f"❌ No AniList results found for: {series_title}")
@@ -476,23 +507,44 @@ class SyncManager:
 
         return None, 0, 0
 
-    def _process_movie(self, series_title: str) -> bool:
-        """Process movie entries"""
+    def _process_movie(self, series_title: str, episode_data: Dict = None) -> bool:
+        """Process movie entries with better title matching"""
         try:
             logger.info(f"🎬 Processing movie: {series_title}")
 
-            # Search for the movie
+            # FIX 2: Use episode_title and season_title for better movie matching
+            search_queries = []
+
+            # If we have episode data, use the more specific titles
+            if episode_data:
+                episode_title = episode_data.get('episode_title', '').strip()
+                season_title = episode_data.get('season_title', '').strip()
+
+                # Add specific titles first for better matching
+                if episode_title:
+                    # Clean up the episode title
+                    clean_episode_title = episode_title.replace(' - ', ' ').strip()
+                    search_queries.append(clean_episode_title)
+
+                if season_title:
+                    # Clean up the season title
+                    clean_season_title = season_title.replace(' - ', ' ').strip()
+                    if clean_season_title not in search_queries:
+                        search_queries.append(clean_season_title)
+
+            # Then add the generic searches as fallback
             clean_title = series_title.replace(' - ', ' ').strip()
-            search_queries = [
+            search_queries.extend([
                 f"{clean_title} 0",
                 f"{clean_title} Movie",
                 clean_title
-            ]
+            ])
 
             best_match = None
             best_similarity = 0
 
             for query in search_queries:
+                logger.debug(f"🔍 Searching for movie with: {query}")
                 results = self.anilist_client.search_anime(query)
                 if not results:
                     continue
@@ -502,16 +554,32 @@ class SyncManager:
                     if format_type not in ['MOVIE', 'SPECIAL', 'OVA']:
                         continue
 
-                    similarity = self.anime_matcher._calculate_title_similarity(clean_title, result)
+                    # Calculate similarity with the query
+                    similarity = self.anime_matcher._calculate_title_similarity(query, result)
+
+                    # If we have episode data, also check similarity with episode/season title
+                    if episode_data:
+                        if episode_title:
+                            ep_similarity = self.anime_matcher._calculate_title_similarity(episode_title, result)
+                            similarity = max(similarity, ep_similarity)
+                        if season_title:
+                            season_similarity = self.anime_matcher._calculate_title_similarity(season_title, result)
+                            similarity = max(similarity, season_similarity)
+
                     if similarity > best_similarity and similarity >= 0.85:
                         best_match = result
                         best_similarity = similarity
+                        logger.debug(f"   Found potential match: {self._get_anime_title(result)} (similarity: {similarity:.2f})")
 
+                # If we found a very good match with specific titles, use it
                 if best_match and best_similarity >= 0.9:
                     break
 
             if not best_match:
                 logger.warning(f"🎬 No movie match found for: {series_title}")
+                if episode_data:
+                    logger.debug(f"   Episode title: {episode_data.get('episode_title')}")
+                    logger.debug(f"   Season title: {episode_data.get('season_title')}")
                 self.sync_results['movies_skipped'] += 1
                 return False
 

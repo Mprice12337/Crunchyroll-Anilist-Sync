@@ -418,7 +418,8 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
 
             # Log final summary
             if all_episodes:
-                self._log_api_summary(all_episodes)
+                #self._log_api_summary(all_episodes)
+                logger.debug(f"Browser-based API scraping completed: {len(all_episodes)} episodes")
             else:
                 logger.warning("No episodes retrieved from browser-based API")
 

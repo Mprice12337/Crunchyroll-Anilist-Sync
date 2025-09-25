@@ -140,8 +140,8 @@ class CrunchyrollParser:
 
         # Show top 15 series
         sorted_series = sorted(series_counts.items(), key=lambda x: x[1], reverse=True)
-        for i, (series_season, count) in enumerate(sorted_series[:15], 1):
-            logger.info(f"{i:2d}. {series_season}: {count} episodes")
+        '''for i, (series_season, count) in enumerate(sorted_series[:15], 1):
+            logger.info(f"{i:2d}. {series_season}: {count} episodes")'''
 
         if len(sorted_series) > 15:
             remaining = len(sorted_series) - 15
@@ -180,19 +180,19 @@ class CrunchyrollParser:
         if season_title:
             extracted_season = self._extract_season_from_title(season_title)
             if extracted_season > 1:
-                logger.debug(f"Using season from title parsing: {extracted_season}")
+                #logger.debug(f"Using season from title parsing: {extracted_season}")
                 return extracted_season
 
         # Tertiary: Use season_sequence_number if it makes sense
         season_sequence = episode_metadata.get('season_sequence_number', 0)
         if isinstance(season_sequence, int) and 1 <= season_sequence <= 10:
-            logger.debug(f"Using season_sequence_number: {season_sequence}")
+            #logger.debug(f"Using season_sequence_number: {season_sequence}")
             return season_sequence
 
         # Last resort: Use the raw season_number but validate it
         raw_season_number = episode_metadata.get('season_number', 1)
         if isinstance(raw_season_number, int) and 1 <= raw_season_number <= 10:
-            logger.debug(f"Using raw season_number: {raw_season_number}")
+            #logger.debug(f"Using raw season_number: {raw_season_number}")
             return raw_season_number
 
         # Default to season 1
