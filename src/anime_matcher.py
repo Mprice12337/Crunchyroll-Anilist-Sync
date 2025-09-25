@@ -163,6 +163,9 @@ class AnimeMatcher:
         target_normalized = self._normalize_title(target_title)
         target_base = self._extract_base_title(target_normalized)
 
+        # Also prepare space-removed versions for comparison
+        target_no_space = target_normalized.replace(' ', '')
+
         max_similarity = 0.0
         titles_to_check = self._extract_titles(candidate)
 
@@ -170,13 +173,27 @@ class AnimeMatcher:
             if title:
                 candidate_normalized = self._normalize_title(title)
                 candidate_base = self._extract_base_title(candidate_normalized)
+                candidate_no_space = candidate_normalized.replace(' ', '')
 
                 # Compare both full and base titles
                 full_similarity = self._calculate_string_similarity(target_normalized, candidate_normalized)
                 base_similarity = self._calculate_string_similarity(target_base, candidate_base)
 
-                # Weight base similarity higher for series matching
-                combined_similarity = (base_similarity * 0.7) + (full_similarity * 0.3)
+                # Also check space-removed similarity for cases like "DAN DA DAN" -> "DANDADAN"
+                space_removed_similarity = 0.0
+                if target_no_space != target_normalized or candidate_no_space != candidate_normalized:
+                    space_removed_similarity = self._calculate_string_similarity(target_no_space, candidate_no_space)
+
+                    # If the space-removed version is a perfect or near-perfect match, boost significantly
+                    if space_removed_similarity >= 0.95:
+                        space_removed_similarity = 1.0  # Treat as perfect match
+
+                # Weight base similarity higher for series matching, but also consider space-removed
+                combined_similarity = max(
+                    (base_similarity * 0.7) + (full_similarity * 0.3),
+                    space_removed_similarity  # Use space-removed if it's better
+                )
+
                 max_similarity = max(max_similarity, combined_similarity)
 
         return max_similarity

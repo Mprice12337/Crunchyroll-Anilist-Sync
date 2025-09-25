@@ -305,13 +305,22 @@ class SyncManager:
             results = self.anilist_client.search_anime(series_title)
 
         # FIX for DAN DA DAN: Try removing spaces if no results
-        if not results:
+        space_removed_results = []
+        if not results or len(results) < 3:  # Also try if we have very few results
             # Try with spaces removed (e.g., "DAN DA DAN" -> "DANDADAN")
             no_space_title = series_title.replace(' ', '')
             if no_space_title != series_title:
-                results = self.anilist_client.search_anime(no_space_title)
-                if results:
+                space_removed_results = self.anilist_client.search_anime(no_space_title)
+                if space_removed_results:
                     logger.debug(f"Found results by removing spaces: {no_space_title}")
+
+                    # If we found results with space removal, prioritize them
+                    # by adding them to the beginning of the results list
+                    seen_ids = {r['id'] for r in results} if results else set()
+                    for result in space_removed_results:
+                        if result['id'] not in seen_ids:
+                            results.insert(0, result)  # Add to beginning for priority
+                            seen_ids.add(result['id'])
 
         return results
 
@@ -333,13 +342,64 @@ class SyncManager:
         season_structure = {}
         base_title = self._clean_title_for_search(series_title)
 
-        # First pass: collect all TV series with their metadata
-        tv_series = []
+        # Special handling for titles where space removal gives better results
+        no_space_title = series_title.replace(' ', '').lower()
+
+        # Group results by base series first
+        series_groups = {}
+
         for result in search_results:
             # Skip movies/specials for regular season structure
             format_type = (result.get('format', '') or '').upper()
             if format_type in ['MOVIE', 'SPECIAL', 'OVA', 'ONA']:
                 continue
+
+            # Try to identify which base series this belongs to
+            result_title = self._get_anime_title(result)
+            result_base = self._extract_base_series_title(result_title)
+
+            # Check if this matches our search better with spaces removed
+            is_primary_match = (
+                    no_space_title in result_title.lower().replace(' ', '') or
+                    base_title.lower() in result_base.lower()
+            )
+
+            if result_base not in series_groups:
+                series_groups[result_base] = {
+                    'entries': [],
+                    'is_primary': is_primary_match
+                }
+
+            series_groups[result_base]['entries'].append(result)
+
+            # Update primary status if this group contains a primary match
+            if is_primary_match:
+                series_groups[result_base]['is_primary'] = True
+
+        # Process only the primary series group if found
+        primary_group = None
+        for group_name, group_data in series_groups.items():
+            if group_data['is_primary']:
+                primary_group = group_data['entries']
+                logger.debug(f"Found primary series group: {group_name}")
+                break
+
+        # If no primary group found, use all results
+        if not primary_group:
+            primary_group = search_results
+
+        # First pass: collect all TV series with their metadata from primary group
+        tv_series = []
+        for result in primary_group:
+            # Skip movies/specials for regular season structure
+            format_type = (result.get('format', '') or '').upper()
+            if format_type in ['MOVIE', 'SPECIAL', 'OVA', 'ONA']:
+                continue
+
+            # Check if this result matches the no-space version better
+            result_title = self._get_anime_title(result).lower()
+            is_space_removed_match = no_space_title != series_title.lower() and no_space_title in result_title.replace(
+                ' ', '')
 
             # Get release date for ordering (handle None values)
             start_date = result.get('startDate', {}) or {}
@@ -353,7 +413,8 @@ class SyncManager:
                 'release_order': release_order,
                 'title': self._get_anime_title(result),
                 'episodes': result.get('episodes', 0),
-                'has_explicit_season': self._has_explicit_season_number(result)
+                'has_explicit_season': self._has_explicit_season_number(result),
+                'is_space_removed_match': is_space_removed_match
             })
 
         # Sort by release date
@@ -377,6 +438,10 @@ class SyncManager:
 
             # Calculate similarity to original search
             similarity = self.anime_matcher._calculate_title_similarity(series_title, result)
+
+            # Boost similarity for space-removed matches
+            if series_data['is_space_removed_match']:
+                similarity += 0.3  # Even bigger boost
 
             # Store in structure (prefer first chronological entry for duplicate season numbers)
             if actual_season not in season_structure:
@@ -464,9 +529,80 @@ class SyncManager:
         return 1
 
     def _determine_correct_entry_and_episode(self, series_title: str, cr_season: int,
-                                            cr_episode: int, season_structure: Dict) -> Tuple[Optional[Dict], int, int]:
+                                             cr_episode: int, season_structure: Dict) -> Tuple[
+        Optional[Dict], int, int]:
         """Determine the correct AniList entry and episode number"""
 
+        # Special handling for better base title matching
+        # If we're looking for a specific season but the matches don't seem right,
+        # try to find entries that actually match the base title better
+
+        if cr_season > 1 and season_structure:
+            # Check if the current season mapping makes sense
+            base_title_normalized = series_title.lower().replace(' ', '')
+
+            # Find the best matching entry based on base title similarity
+            best_entry = None
+            best_similarity = 0
+            best_season_num = cr_season
+
+            for season_num, season_data in season_structure.items():
+                entry_title = season_data['title'].lower().replace(' ', '')
+
+                # Calculate how well this entry matches our base title
+                # For "DAN DA DAN" we want "Dandadan" not "Da Capo"
+                if base_title_normalized in entry_title or entry_title in base_title_normalized:
+                    # This is likely the correct series
+                    similarity = season_data.get('similarity', 0)
+
+                    # Check if this entry can handle our episode number
+                    max_episodes = season_data['episodes'] or 999
+
+                    # If this is season 1 and our episode exceeds it, it might be absolute numbering
+                    if season_num == 1 and cr_episode > max_episodes:
+                        # This might be the right series but wrong season
+                        # Keep searching for the right season
+                        continue
+
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_entry = season_data['entry']
+                        best_season_num = season_num
+
+                        # If episode fits within this season, use it
+                        if cr_episode <= max_episodes:
+                            logger.info(
+                                f"✅ Found matching series: {season_data['title']} - using as season {season_num}")
+                            return best_entry, season_num, cr_episode
+
+            # If we found a matching series but episode doesn't fit any season,
+            # it might be using absolute numbering
+            if best_entry and best_season_num == 1:
+                # Try to map absolute episode to correct season
+                cumulative_episodes = 0
+                sorted_seasons = sorted(season_structure.keys())
+
+                for season_num in sorted_seasons:
+                    season_data = season_structure[season_num]
+
+                    # Only consider seasons from the same series
+                    entry_title = season_data['title'].lower().replace(' ', '')
+                    if not (base_title_normalized in entry_title or entry_title in base_title_normalized):
+                        continue
+
+                    season_episodes = season_data['episodes'] or 0
+
+                    # Check if episode falls within this season's range
+                    if cr_episode <= cumulative_episodes + season_episodes:
+                        episode_in_season = cr_episode - cumulative_episodes
+                        if episode_in_season > 0:
+                            logger.info(
+                                f"📊 Mapped absolute episode {cr_episode} to Season {season_num} Episode {episode_in_season}")
+                            return season_data['entry'], season_num, episode_in_season
+
+                    cumulative_episodes += season_episodes
+
+        # Original logic as fallback
         # First, check if the Crunchyroll season/episode makes sense as-is
         if cr_season in season_structure:
             season_data = season_structure[cr_season]
@@ -477,7 +613,8 @@ class SyncManager:
                 logger.info(f"✅ Episode {cr_episode} is valid for season {cr_season} (max: {max_episodes})")
                 return season_data['entry'], cr_season, cr_episode
             else:
-                logger.info(f"⚠️ Episode {cr_episode} exceeds season {cr_season} max ({max_episodes}), checking if absolute numbering...")
+                logger.info(
+                    f"⚠️ Episode {cr_episode} exceeds season {cr_season} max ({max_episodes}), checking if absolute numbering...")
 
         # Episode might be using absolute numbering, need to find correct season
         cumulative_episodes = 0
@@ -515,6 +652,33 @@ class SyncManager:
             return season_data['entry'], 1, cr_episode
 
         return None, 0, 0
+
+    def _extract_base_series_title(self, title: str) -> str:
+        """Extract the base series name without season/part indicators"""
+        import re
+
+        # Remove common season/part indicators
+        base = title
+        patterns = [
+            r'\s*[-:]\s*.*(?:Season|Part)\s*\d+.*$',
+            r'\s+(?:Season|Part)\s*\d+.*$',
+            r'\s+\d+(?:st|nd|rd|th)\s+Season.*$',
+            r'\s+(?:II|III|IV|V|VI)(?:\s|$).*$',
+            r'\s*[-:]\s*.*(?:Cour|Arc)\s*\d+.*$',
+        ]
+
+        for pattern in patterns:
+            base = re.sub(pattern, '', base, flags=re.IGNORECASE)
+
+        # Also try to extract base from subtitle patterns
+        # e.g., "Title: Subtitle" -> "Title"
+        if ':' in base:
+            parts = base.split(':', 1)
+            # Check if the part after colon contains season indicators
+            if len(parts) > 1 and re.search(r'(?:Season|Part)\s*\d+', parts[1], re.IGNORECASE):
+                base = parts[0]
+
+        return base.strip()
 
     def _process_movie(self, series_title: str, episode_data: Dict = None) -> bool:
         """Process movie entries with better title matching"""
