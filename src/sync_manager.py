@@ -144,14 +144,16 @@ class SyncManager:
         for i, ((series_title, cr_season), latest_episode) in enumerate(series_progress.items(), 1):
             try:
                 season_display = "Movie" if cr_season == 0 else f"Season {cr_season}"
-                logger.info(f"[{i}/{len(series_progress)}] Processing: {series_title} ({season_display}) - Episode {latest_episode}")
+                logger.info(
+                    f"[{i}/{len(series_progress)}] Processing: {series_title} ({season_display}) - Episode {latest_episode}")
 
                 if self._process_series_entry(series_title, cr_season, latest_episode):
                     self.sync_results['successful_updates'] += 1
                 else:
                     self.sync_results['failed_updates'] += 1
 
-                time.sleep(1.5)  # Rate limiting
+                # Smart delay between operations based on rate limiting
+                self._intelligent_delay()
 
             except Exception as e:
                 logger.error(f"Error processing {series_title} Season {cr_season}: {e}")
@@ -821,6 +823,11 @@ class SyncManager:
         logger.info(f"  🎬 Movies completed: {results['movies_completed']}")
         logger.info(f"  🎬 Movies skipped: {results['movies_skipped']}")
 
+        # Add rate limiting information
+        if hasattr(self.anilist_client, 'rate_limiter'):
+            rate_info = self.anilist_client.rate_limiter.get_status_info()
+            logger.info(f"  ⏱️ Final {rate_info}")
+
         if results['successful_updates'] > 0:
             total_attempts = results['successful_updates'] + results['failed_updates']
             success_rate = (results['successful_updates'] / total_attempts) * 100
@@ -844,6 +851,33 @@ class SyncManager:
 
         except Exception as e:
             logger.error(f"Failed to save debug data: {e}")
+
+    def _intelligent_delay(self) -> None:
+        """Smart delay between operations based on rate limiting status"""
+        try:
+            # Check if we have rate limit info from the AniList client
+            if hasattr(self.anilist_client, 'rate_limiter'):
+                rate_limiter = self.anilist_client.rate_limiter
+
+                # If we have plenty of requests remaining, use shorter delay
+                if rate_limiter.remaining > 10:
+                    delay = 0.5
+                # If we're getting low on requests, use longer delay
+                elif rate_limiter.remaining > 5:
+                    delay = 1.0
+                # If we're very low, use even longer delay
+                else:
+                    delay = 2.0
+
+                logger.debug(f"Using {delay}s delay ({rate_limiter.get_status_info()})")
+                time.sleep(delay)
+            else:
+                # Fallback to fixed delay if rate limiter not available
+                time.sleep(1.0)
+
+        except Exception as e:
+            logger.debug(f"Error in intelligent delay: {e}")
+            time.sleep(1.0)  # Safe fallback
 
     def _cleanup(self) -> None:
         """Clean up resources"""
