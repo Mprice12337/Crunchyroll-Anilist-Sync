@@ -1,5 +1,5 @@
 """
-AniList API Handler with Rate Limiting
+AniList API Handler with Rate Limiting and Rewatch Support
 """
 
 import logging
@@ -66,7 +66,7 @@ class RateLimitTracker:
 
 
 class AniListAPI:
-    """AniList GraphQL API handler with rate limiting"""
+    """AniList GraphQL API handler with rate limiting and rewatch support"""
 
     def __init__(self):
         self.graphql_url = "https://graphql.anilist.co"
@@ -114,9 +114,61 @@ class AniListAPI:
             logger.error(f"Search failed for '{title}': {e}")
             return None
 
+    def get_anime_list_entry(self, anime_id: int, access_token: str) -> Optional[Dict[str, Any]]:
+        """Get user's current list entry for an anime"""
+        try:
+            query = """
+            query ($mediaId: Int) {
+                MediaList(mediaId: $mediaId) {
+                    id
+                    progress
+                    status
+                    repeat
+                    score
+                    startedAt {
+                        year
+                        month
+                        day
+                    }
+                    completedAt {
+                        year
+                        month
+                        day
+                    }
+                    media {
+                        id
+                        title {
+                            romaji
+                        }
+                        episodes
+                    }
+                }
+            }
+            """
+
+            variables = {'mediaId': anime_id}
+            result = self._execute_query(query, variables, access_token)
+
+            if result and 'data' in result:
+                entry = result['data'].get('MediaList')
+                if entry:
+                    logger.debug(f"Found existing list entry for anime {anime_id}: "
+                               f"status={entry.get('status')}, progress={entry.get('progress')}, "
+                               f"repeat={entry.get('repeat', 0)}")
+                    return entry
+                else:
+                    logger.debug(f"No existing list entry found for anime {anime_id}")
+                    return None
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get list entry for anime {anime_id}: {e}")
+            return None
+
     def update_anime_progress(self, anime_id: int, progress: int, access_token: str,
-                             status: Optional[str] = None) -> bool:
-        """Update anime progress on AniList with rate limiting"""
+                             status: Optional[str] = None, repeat: Optional[int] = None) -> bool:
+        """Update anime progress on AniList with rate limiting and rewatch support"""
         try:
             # Build mutation based on what we're updating
             variables = {
@@ -132,16 +184,23 @@ class AniListAPI:
                 mutation_parts.append('status: $status')
                 variable_parts.append('$status: MediaListStatus')
 
+            if repeat is not None:
+                variables['repeat'] = repeat
+                mutation_parts.append('repeat: $repeat')
+                variable_parts.append('$repeat: Int')
+
             mutation = f"""
             mutation ({', '.join(variable_parts)}) {{
                 SaveMediaListEntry({', '.join(mutation_parts)}) {{
                     id
                     progress
                     status
+                    repeat
                     media {{
                         title {{
                             romaji
                         }}
+                        episodes
                     }}
                 }}
             }}
@@ -154,8 +213,13 @@ class AniListAPI:
                 media_title = entry.get('media', {}).get('title', {}).get('romaji', 'Unknown')
                 updated_progress = entry.get('progress', progress)
                 updated_status = entry.get('status', 'Unknown')
+                updated_repeat = entry.get('repeat', 0)
 
-                logger.info(f"✅ Updated '{media_title}': {updated_progress} episodes ({updated_status})")
+                status_text = f"{updated_progress} episodes ({updated_status})"
+                if updated_repeat > 0:
+                    status_text += f" [Rewatch #{updated_repeat}]"
+
+                logger.info(f"✅ Updated '{media_title}': {status_text}")
                 return True
             else:
                 logger.error(f"Failed to update anime {anime_id}")

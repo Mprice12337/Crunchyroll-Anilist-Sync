@@ -1,5 +1,5 @@
 """
-Enhanced sync manager with fixes for movie matching and series search
+Enhanced sync manager with fixes for movie matching and series search + rewatch support
 """
 
 import logging
@@ -15,7 +15,7 @@ from cache_manager import CacheManager
 logger = logging.getLogger(__name__)
 
 class SyncManager:
-    """Enhanced sync manager with dynamic AniList validation"""
+    """Enhanced sync manager with dynamic AniList validation and rewatch support"""
 
     def __init__(self, **config):
         self.config = config
@@ -48,7 +48,10 @@ class SyncManager:
             'no_matches_found': 0,
             'movies_completed': 0,
             'movies_skipped': 0,
-            'episode_conversions': 0  # Track when we convert episode numbers
+            'episode_conversions': 0,  # Track when we convert episode numbers
+            'rewatches_detected': 0,   # NEW: Track rewatch detection
+            'rewatches_completed': 0,  # NEW: Track completed rewatches
+            'new_series_started': 0,   # NEW: Track new series
         }
 
         # Cache for anime season structures (temporary, per run)
@@ -60,7 +63,7 @@ class SyncManager:
     def run_sync(self) -> bool:
         """Execute the enhanced sync process"""
         try:
-            logger.info("🚀 Starting enhanced Crunchyroll-AniList sync...")
+            logger.info("🚀 Starting enhanced Crunchyroll-AniList sync with rewatch support...")
 
             # Clear cache if requested
             if self.config.get('clear_cache'):
@@ -75,7 +78,7 @@ class SyncManager:
             if not self._scrape_crunchyroll_history():
                 return False
 
-            # Step 3: Process and update AniList with dynamic validation
+            # Step 3: Process and update AniList with dynamic validation and rewatch support
             if not self._update_anilist_progress_with_validation():
                 return False
 
@@ -129,8 +132,8 @@ class SyncManager:
             return False
 
     def _update_anilist_progress_with_validation(self) -> bool:
-        """Update AniList progress with dynamic validation"""
-        logger.info("🎯 Updating AniList progress with dynamic validation...")
+        """Update AniList progress with dynamic validation and rewatch support"""
+        logger.info("🎯 Updating AniList progress with dynamic validation and rewatch support...")
 
         if not self.watch_history:
             logger.info("No episodes to process")
@@ -191,7 +194,7 @@ class SyncManager:
         return series_season_progress
 
     def _process_series_entry(self, series_title: str, cr_season: int, cr_episode: int) -> bool:
-        """Process a single series entry with dynamic AniList validation"""
+        """Process a single series entry with dynamic AniList validation and rewatch support"""
 
         # Handle movies separately
         if cr_season == 0:
@@ -262,28 +265,61 @@ class SyncManager:
                 if actual_season != cr_season:
                     self.sync_results['season_mismatches'] += 1
 
-            # Determine status
-            status = None
-            if total_episodes and actual_episode >= total_episodes:
-                status = 'COMPLETED'
-                logger.info(f"🏁 Will mark as completed ({actual_episode}/{total_episodes})")
-
-            # Update on AniList (or dry run)
+            # NEW: Use rewatch-aware update method
             if self.config.get('dry_run'):
-                logger.info(f"[DRY RUN] Would update {anime_title} to episode {actual_episode}")
-                if status:
-                    logger.info(f"[DRY RUN] Would mark as {status}")
+                logger.info(f"[DRY RUN] Would update {anime_title} to episode {actual_episode} with rewatch detection")
+
+                # For dry run, simulate the rewatch detection logic
+                existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+                if existing_entry:
+                    # FIXED: Use the actual rewatch detection logic, not just check status
+                    is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, actual_episode, total_episodes)
+                    if is_rewatch:
+                        logger.info(f"[DRY RUN] Would be detected as rewatch")
+                        self.sync_results['rewatches_detected'] += 1
+
+                        # Check if it would be a completion
+                        if total_episodes and actual_episode >= total_episodes:
+                            current_repeat = existing_entry.get('repeat', 0)
+                            logger.info(f"[DRY RUN] Would complete rewatch (new repeat count: {current_repeat + 1})")
+                            self.sync_results['rewatches_completed'] += 1
+                    else:
+                        # Check if this would be a new series
+                        current_progress = existing_entry.get('progress', 0)
+                        current_status = existing_entry.get('status')
+                        if current_status == 'PLANNING' or current_progress == 0:
+                            logger.info(f"[DRY RUN] Would start new series")
+                            self.sync_results['new_series_started'] += 1
+                        else:
+                            logger.info(f"[DRY RUN] Would continue normal progress")
+                else:
+                    logger.info(f"[DRY RUN] Would start completely new series")
+                    self.sync_results['new_series_started'] += 1
+
                 return True
 
-            # Actual update
-            success = self.anilist_client.update_anime_progress(
+            # Actual update with rewatch logic
+            success = self.anilist_client.update_anime_progress_with_rewatch_logic(
                 anime_id=anime_id,
                 progress=actual_episode,
-                status=status
+                total_episodes=total_episodes
             )
 
             if success:
                 logger.info(f"✅ Successfully updated {anime_title} to episode {actual_episode}")
+
+                # Track rewatch statistics
+                existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+                if existing_entry:
+                    is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, actual_episode, total_episodes)
+                    if is_rewatch:
+                        self.sync_results['rewatches_detected'] += 1
+                        if total_episodes and actual_episode >= total_episodes:
+                            self.sync_results['rewatches_completed'] += 1
+                    else:
+                        # Check if this is a new series (no previous progress)
+                        if existing_entry.get('progress', 0) == 0:
+                            self.sync_results['new_series_started'] += 1
             else:
                 logger.error(f"❌ Failed to update {anime_title}")
 
@@ -683,7 +719,7 @@ class SyncManager:
         return base.strip()
 
     def _process_movie(self, series_title: str, episode_data: Dict = None) -> bool:
-        """Process movie entries with better title matching"""
+        """Process movie entries with better title matching and rewatch support"""
         try:
             logger.info(f"🎬 Processing movie: {series_title}")
 
@@ -779,18 +815,46 @@ class SyncManager:
             logger.info(f"🎬 Found movie: {anime_title} (similarity: {best_similarity:.2f})")
 
             if self.config.get('dry_run'):
-                logger.info(f"[DRY RUN] Would mark movie {anime_title} as COMPLETED")
+                logger.info(f"[DRY RUN] Would mark movie {anime_title} as COMPLETED with rewatch detection")
+
+                # For dry run, simulate the rewatch detection for movies
+                existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+                if existing_entry:
+                    # FIXED: Use proper rewatch detection logic for movies
+                    is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, 1, 1)
+                    if is_rewatch:
+                        current_repeat = existing_entry.get('repeat', 0)
+                        logger.info(f"[DRY RUN] Movie rewatch would be detected (new repeat count: {current_repeat + 1})")
+                        self.sync_results['rewatches_detected'] += 1
+                        self.sync_results['rewatches_completed'] += 1
+                    else:
+                        current_status = existing_entry.get('status')
+                        if current_status in ['PLANNING', None] or existing_entry.get('progress', 0) == 0:
+                            logger.info(f"[DRY RUN] Would mark new movie as completed")
+                        else:
+                            logger.info(f"[DRY RUN] Would update existing movie entry")
+                else:
+                    logger.info(f"[DRY RUN] Would add new movie as completed")
+
                 return True
 
-            success = self.anilist_client.update_anime_progress(
+            # Use rewatch-aware update for movies too
+            success = self.anilist_client.update_anime_progress_with_rewatch_logic(
                 anime_id=anime_id,
                 progress=1,
-                status='COMPLETED'
+                total_episodes=1  # Movies have 1 "episode"
             )
 
             if success:
-                logger.info(f"✅ Marked movie {anime_title} as COMPLETED")
+                logger.info(f"✅ Updated movie {anime_title}")
                 self.sync_results['movies_completed'] += 1
+
+                # Check if this was a rewatch
+                existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+                if existing_entry and existing_entry.get('status') == 'COMPLETED':
+                    current_repeat = existing_entry.get('repeat', 0)
+                    if current_repeat > 0:
+                        self.sync_results['rewatches_completed'] += 1
 
             return success
 
@@ -806,11 +870,11 @@ class SyncManager:
         return str(title_obj) if title_obj else 'Unknown'
 
     def _report_enhanced_results(self) -> None:
-        """Report sync results"""
+        """Report sync results with rewatch statistics"""
         results = self.sync_results
 
         logger.info("=" * 60)
-        logger.info("📊 Sync Results:")
+        logger.info("📊 Enhanced Sync Results with Rewatch Support:")
         logger.info("=" * 60)
         logger.info(f"  📺 Total episodes found: {results['total_episodes']}")
         logger.info(f"  ✅ Successful updates: {results['successful_updates']}")
@@ -822,6 +886,12 @@ class SyncManager:
         logger.info(f"  🔍 No matches found: {results['no_matches_found']}")
         logger.info(f"  🎬 Movies completed: {results['movies_completed']}")
         logger.info(f"  🎬 Movies skipped: {results['movies_skipped']}")
+
+        # NEW: Rewatch statistics
+        logger.info("  " + "─" * 30)
+        logger.info(f"  🔄 Rewatches detected: {results['rewatches_detected']}")
+        logger.info(f"  🏁 Rewatches completed: {results['rewatches_completed']}")
+        logger.info(f"  🆕 New series started: {results['new_series_started']}")
 
         # Add rate limiting information
         if hasattr(self.anilist_client, 'rate_limiter'):
@@ -837,6 +907,12 @@ class SyncManager:
 
         if results['episode_conversions'] > 0:
             logger.info("💡 Episode numbers were automatically converted from absolute to per-season numbering")
+
+        if results['rewatches_detected'] > 0:
+            logger.info("🔄 Rewatch detection is active - completed series are marked as 'watching' when rewatched")
+
+        if results['rewatches_completed'] > 0:
+            logger.info(f"🏁 {results['rewatches_completed']} rewatch(es) were completed and rewatch count was incremented")
 
     def _save_debug_data(self, filename: str, data: Any) -> None:
         """Save debug data"""
