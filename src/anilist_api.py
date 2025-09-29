@@ -1,5 +1,5 @@
 """
-AniList API Handler with Rate Limiting and Rewatch Support
+AniList API Handler with Enhanced Debugging and Explicit User Queries
 """
 
 import logging
@@ -66,11 +66,40 @@ class RateLimitTracker:
 
 
 class AniListAPI:
-    """AniList GraphQL API handler with rate limiting and rewatch support"""
+    """AniList GraphQL API handler with enhanced debugging and explicit user queries"""
 
     def __init__(self):
         self.graphql_url = "https://graphql.anilist.co"
         self.rate_limiter = RateLimitTracker()
+        self.current_user_id = None  # Cache the authenticated user ID
+
+    def _get_current_user_id(self, access_token: str) -> Optional[int]:
+        """Get the current authenticated user's ID"""
+        if self.current_user_id:
+            return self.current_user_id
+
+        try:
+            query = """
+            query {
+                Viewer {
+                    id
+                    name
+                }
+            }
+            """
+
+            result = self._execute_query(query, {}, access_token)
+            if result and 'data' in result and 'Viewer' in result['data']:
+                viewer = result['data']['Viewer']
+                self.current_user_id = viewer.get('id')
+                user_name = viewer.get('name', 'Unknown')
+                logger.info(f"🔍 Authenticated as user: {user_name} (ID: {self.current_user_id})")
+                return self.current_user_id
+
+        except Exception as e:
+            logger.error(f"Failed to get current user ID: {e}")
+
+        return None
 
     def search_anime(self, title: str, access_token: str) -> Optional[List[Dict[str, Any]]]:
         """Search for anime by title with rate limiting"""
@@ -115,11 +144,19 @@ class AniListAPI:
             return None
 
     def get_anime_list_entry(self, anime_id: int, access_token: str) -> Optional[Dict[str, Any]]:
-        """Get user's current list entry for an anime"""
+        """Get user's current list entry for an anime with explicit user specification and debugging"""
+
+        # Get current user ID first
+        user_id = self._get_current_user_id(access_token)
+        if not user_id:
+            logger.error("Could not determine current user ID")
+            return None
+
         try:
+            # Use explicit user ID and media ID query
             query = """
-            query ($mediaId: Int) {
-                MediaList(mediaId: $mediaId) {
+            query ($userId: Int, $mediaId: Int) {
+                MediaList(userId: $userId, mediaId: $mediaId) {
                     id
                     progress
                     status
@@ -142,19 +179,43 @@ class AniListAPI:
                         }
                         episodes
                     }
+                    user {
+                        id
+                        name
+                    }
                 }
             }
             """
 
-            variables = {'mediaId': anime_id}
+            variables = {
+                'userId': user_id,
+                'mediaId': anime_id
+            }
+
+            logger.debug(f"🔍 Querying MediaList for user {user_id}, anime {anime_id}")
+
             result = self._execute_query(query, variables, access_token)
 
             if result and 'data' in result:
                 entry = result['data'].get('MediaList')
                 if entry:
-                    logger.debug(f"Found existing list entry for anime {anime_id}: "
-                               f"status={entry.get('status')}, progress={entry.get('progress')}, "
-                               f"repeat={entry.get('repeat', 0)}")
+                    # ENHANCED DEBUGGING: Show exactly what we got from the API
+                    user_info = entry.get('user', {})
+                    media_info = entry.get('media', {})
+
+                    logger.info(f"📋 RAW API Response for anime {anime_id}:")
+                    logger.info(f"   User: {user_info.get('name', 'Unknown')} (ID: {user_info.get('id', 'Unknown')})")
+                    logger.info(f"   Media: {media_info.get('title', {}).get('romaji', 'Unknown')}")
+                    logger.info(f"   Status: {entry.get('status')}")
+                    logger.info(f"   Progress: {entry.get('progress', 0)}")
+                    logger.info(f"   Repeat: {entry.get('repeat', 0)}")
+
+                    # Double-check that this is actually OUR user's entry
+                    if user_info.get('id') != user_id:
+                        logger.error(f"⚠️ API returned entry for wrong user! Expected {user_id}, got {user_info.get('id')}")
+                        return None
+
+                    logger.debug(f"✅ Confirmed entry belongs to correct user {user_id}")
                     return entry
                 else:
                     logger.debug(f"No existing list entry found for anime {anime_id}")
@@ -168,7 +229,7 @@ class AniListAPI:
 
     def update_anime_progress(self, anime_id: int, progress: int, access_token: str,
                              status: Optional[str] = None, repeat: Optional[int] = None) -> bool:
-        """Update anime progress on AniList with rate limiting and rewatch support"""
+        """Update anime progress on AniList with rate limiting and enhanced debugging"""
         try:
             # Build mutation based on what we're updating
             variables = {
@@ -202,9 +263,15 @@ class AniListAPI:
                         }}
                         episodes
                     }}
+                    user {{
+                        id
+                        name
+                    }}
                 }}
             }}
             """
+
+            logger.debug(f"🔧 Updating anime {anime_id}: progress={progress}, status={status}, repeat={repeat}")
 
             result = self._execute_query(mutation, variables, access_token)
 
@@ -214,12 +281,15 @@ class AniListAPI:
                 updated_progress = entry.get('progress', progress)
                 updated_status = entry.get('status', 'Unknown')
                 updated_repeat = entry.get('repeat', 0)
+                user_info = entry.get('user', {})
 
                 status_text = f"{updated_progress} episodes ({updated_status})"
                 if updated_repeat > 0:
                     status_text += f" [Rewatch #{updated_repeat}]"
 
                 logger.info(f"✅ Updated '{media_title}': {status_text}")
+                logger.debug(f"   Mutation confirmed for user: {user_info.get('name')} (ID: {user_info.get('id')})")
+
                 return True
             else:
                 logger.error(f"Failed to update anime {anime_id}")
