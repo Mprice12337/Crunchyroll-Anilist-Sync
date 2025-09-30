@@ -429,6 +429,115 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
             logger.error(f"Browser-based API scraping failed: {e}")
             return []
 
+    def get_watch_history_page(self, page_num: int, page_size: int = 100) -> List[Dict[str, Any]]:
+        """
+        Fetch a single page of watch history
+
+        Args:
+            page_num: Page number (1-indexed)
+            page_size: Number of items per page
+
+        Returns:
+            List of episode dictionaries for this page
+        """
+        logger.debug(f"📄 Fetching page {page_num} (size: {page_size})...")
+
+        if not self.is_authenticated:
+            logger.error("Not authenticated! Call authenticate() first.")
+            return []
+
+        # Ensure we're on Crunchyroll to maintain session context
+        self.driver.get("https://www.crunchyroll.com")
+        time.sleep(1)
+
+        # Ensure we have valid tokens
+        if not self.access_token or not self.cached_account_id:
+            logger.warning("Missing access_token or account_id - requesting new tokens...")
+            account_id = self._get_account_id()
+            if not account_id:
+                logger.error("Could not get account ID from token endpoint")
+                return []
+        else:
+            if not self._verify_cached_token():
+                logger.error("Cached token validation failed")
+                return []
+            account_id = self.cached_account_id
+
+        try:
+            # Calculate start parameter (0-indexed for API)
+            start_param = (page_num - 1) * page_size if page_num > 1 else 0
+
+            logger.debug(f"Fetching from API: start={start_param}, size={page_size}")
+
+            # Make API request through browser JavaScript
+            api_response = self.driver.execute_script("""
+                const accountId = arguments[0];
+                const pageSize = arguments[1];
+                const startParam = arguments[2];
+                const accessToken = arguments[3];
+
+                const apiUrl = `https://www.crunchyroll.com/content/v2/${accountId}/watch-history`;
+                const params = new URLSearchParams({
+                    page_size: pageSize,
+                    locale: 'en-US'
+                });
+
+                if (startParam > 0) {
+                    params.append('start', startParam);
+                }
+
+                const headers = {
+                    'Accept': 'application/json',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'sec-fetch-dest': 'empty',
+                    'sec-fetch-mode': 'cors',
+                    'sec-fetch-site': 'same-origin'
+                };
+
+                if (accessToken) {
+                    headers['Authorization'] = `Bearer ${accessToken}`;
+                }
+
+                return fetch(`${apiUrl}?${params.toString()}`, {
+                    method: 'GET',
+                    headers: headers,
+                    credentials: 'include',
+                    mode: 'cors'
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return { success: false, status: response.status, statusText: response.statusText };
+                    }
+                    return response.json().then(data => ({ success: true, data: data }));
+                })
+                .catch(error => ({ success: false, error: error.message }));
+            """, account_id, page_size, start_param, self.access_token)
+
+            # Handle response
+            if not api_response or not api_response.get('success'):
+                status = api_response.get('status', 'unknown') if api_response else 'no response'
+                error_msg = api_response.get('error', 'unknown error') if api_response else 'no response'
+                logger.error(f"API page {page_num} failed: {status} - {error_msg}")
+                return []
+
+            data = api_response.get('data', {})
+            items = data.get('data', [])
+
+            if not items:
+                logger.debug(f"No items found on page {page_num}")
+                return []
+
+            # Parse episodes from this page
+            page_episodes = self._parse_api_response(items)
+
+            logger.debug(f"Page {page_num}: parsed {len(page_episodes)} valid episodes")
+
+            return page_episodes
+
+        except Exception as e:
+            logger.error(f"Error fetching page {page_num}: {e}")
+            return []
+
     # ==================== UTILITY METHODS ====================
 
     def _save_debug_html(self, filename: str) -> None:

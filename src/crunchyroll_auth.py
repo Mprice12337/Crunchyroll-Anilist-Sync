@@ -12,6 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
 from flaresolvrrr_client import FlareSolverrClient
 
@@ -28,6 +29,11 @@ class CrunchyrollAuth:
         if not self.access_token or not self.cached_account_id:
             logger.debug("No cached token to verify")
             return False
+
+        # OPTIMIZATION: Check token age first to avoid unnecessary API call
+        if self._should_refresh_token():
+            logger.info("🔄 Token age threshold reached, refreshing preemptively...")
+            return self._refresh_access_token()
 
         try:
             logger.debug("Verifying cached access token...")
@@ -64,8 +70,6 @@ class CrunchyrollAuth:
                 return True
             else:
                 logger.info(f"❌ Cached token invalid (status: {test_response.get('status', 'unknown')}), refreshing...")
-
-                # Try to refresh the token
                 return self._refresh_access_token()
 
         except Exception as e:
@@ -581,4 +585,29 @@ class CrunchyrollAuth:
 
         except Exception as e:
             logger.error(f"Error capturing tokens: {e}")
+            return False
+
+    def _should_refresh_token(self) -> bool:
+        """Check if cached token should be refreshed based on age"""
+        try:
+            cached_auth = self.auth_cache.load_crunchyroll_auth()
+            if not cached_auth or not cached_auth.get('access_token'):
+                return True
+
+            # Check token timestamp
+            timestamp_str = cached_auth.get('timestamp')
+            if not timestamp_str:
+                return True
+
+            token_age = datetime.now() - datetime.fromisoformat(timestamp_str)
+
+            # Refresh if token is older than 23 hours (tokens typically last 24h)
+            if token_age > timedelta(hours=23):
+                logger.info(f"Token is {token_age.total_seconds() / 3600:.1f} hours old, proactively refreshing")
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.debug(f"Error checking token age: {e}")
             return False

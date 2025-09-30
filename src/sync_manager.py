@@ -110,59 +110,71 @@ class SyncManager:
         return True
 
     def _scrape_crunchyroll_history(self) -> bool:
-        """Scrape watch history from Crunchyroll"""
-        logger.info("📚 Scraping Crunchyroll watch history...")
+        """Scrape watch history from Crunchyroll with smart pagination"""
+        logger.info("📚 Scraping Crunchyroll watch history with smart pagination...")
 
         try:
-            self.watch_history = self.crunchyroll_scraper.get_watch_history(
-                max_pages=self.config.get('max_pages', 10)
-            )
-
-            if not self.watch_history:
-                logger.warning("⚠️ No watch history found")
-                return True
-
-            if self.config.get('debug'):
-                self._save_debug_data('watch_history.json', self.watch_history)
-
+            # Don't fetch all pages upfront - we'll fetch page by page
+            # and stop when we hit entries that don't need updates
+            self.watch_history = []  # Initialize empty
             return True
 
         except Exception as e:
-            logger.error(f"Failed to scrape Crunchyroll history: {e}")
+            logger.error(f"Failed to initialize Crunchyroll scraping: {e}")
             return False
 
     def _update_anilist_progress_with_validation(self) -> bool:
-        """Update AniList progress with dynamic validation and rewatch support"""
-        logger.info("🎯 Updating AniList progress with dynamic validation and rewatch support...")
+        """Update AniList progress with smart pagination - fetch and process page by page"""
+        logger.info("🎯 Updating AniList with smart pagination...")
 
-        if not self.watch_history:
-            logger.info("No episodes to process")
-            return True
+        max_pages = self.config.get('max_pages', 10)
+        page_num = 0
+        total_processed = 0
+        consecutive_no_update_pages = 0
 
-        # Group episodes by series and season, but keep original episode data
-        series_progress = self._group_episodes_by_series_and_season(self.watch_history)
+        while page_num < max_pages:
+            page_num += 1
 
-        logger.info(f"Processing {len(series_progress)} unique series-season combinations...")
+            # Fetch one page at a time
+            logger.info(f"📄 Fetching and processing page {page_num}/{max_pages}...")
 
-        for i, ((series_title, cr_season), latest_episode) in enumerate(series_progress.items(), 1):
-            try:
-                season_display = "Movie" if cr_season == 0 else f"Season {cr_season}"
-                logger.info(
-                    f"[{i}/{len(series_progress)}] Processing: {series_title} ({season_display}) - Episode {latest_episode}")
+            page_episodes = self.crunchyroll_scraper.get_watch_history_page(page_num)
 
-                if self._process_series_entry(series_title, cr_season, latest_episode):
-                    self.sync_results['successful_updates'] += 1
-                else:
-                    self.sync_results['failed_updates'] += 1
+            if not page_episodes:
+                logger.info(f"No more episodes on page {page_num}, stopping")
+                break
 
-                # Smart delay between operations based on rate limiting
-                self._intelligent_delay()
+            logger.info(f"Found {len(page_episodes)} episodes on page {page_num}")
 
-            except Exception as e:
-                logger.error(f"Error processing {series_title} Season {cr_season}: {e}")
-                self.sync_results['failed_updates'] += 1
-                continue
+            # Process this page
+            page_updates = self._process_page_episodes(page_episodes)
+            total_processed += len(page_episodes)
 
+            # Track if we made any updates on this page
+            updates_made = page_updates['successful_updates'] + page_updates['failed_updates']
+
+            logger.info(f"Page {page_num}: {updates_made} updates needed, "
+                        f"{page_updates['skipped_episodes']} already up-to-date")
+
+            # Smart stopping logic
+            if updates_made == 0:
+                consecutive_no_update_pages += 1
+                logger.info(f"✨ No updates needed on page {page_num} "
+                            f"({consecutive_no_update_pages} consecutive)")
+
+                # If we have 2 consecutive pages with no updates, we can safely stop
+                if consecutive_no_update_pages >= 2:
+                    logger.info("✅ Found 2 consecutive pages with no updates - "
+                                "watch history is already synced!")
+                    break
+            else:
+                # Reset counter if we found updates
+                consecutive_no_update_pages = 0
+
+            # Small delay between pages
+            time.sleep(0.5)
+
+        logger.info(f"📊 Processed {total_processed} total episodes across {page_num} pages")
         return True
 
     def _group_episodes_by_series_and_season(self, episodes: List[Dict]) -> Dict[tuple, int]:
@@ -251,6 +263,14 @@ class SyncManager:
                 self.sync_results['no_matches_found'] += 1
                 return False
 
+            if matched_entry:  # After we've found the matched entry
+                anime_id = matched_entry['id']
+
+                if not self._needs_update(anime_id, actual_episode):
+                    logger.debug(f"✓ {series_title} S{actual_season}E{actual_episode} already synced, skipping")
+                    self.sync_results['skipped_episodes'] += 1
+                    return False
+
             # Log the matching result
             anime_id = matched_entry['id']
             anime_title = self._get_anime_title(matched_entry)
@@ -299,35 +319,67 @@ class SyncManager:
                 return True
 
             # Actual update with rewatch logic
-            success = self.anilist_client.update_anime_progress_with_rewatch_logic(
+            update_result = self.anilist_client.update_anime_progress_with_rewatch_logic(
                 anime_id=anime_id,
                 progress=actual_episode,
                 total_episodes=total_episodes
             )
 
-            if success:
+            if update_result['success']:
                 logger.info(f"✅ Successfully updated {anime_title} to episode {actual_episode}")
 
-                # Track rewatch statistics
-                existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
-                if existing_entry:
-                    is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, actual_episode, total_episodes)
-                    if is_rewatch:
-                        self.sync_results['rewatches_detected'] += 1
-                        if total_episodes and actual_episode >= total_episodes:
-                            self.sync_results['rewatches_completed'] += 1
-                    else:
-                        # Check if this is a new series (no previous progress)
-                        if existing_entry.get('progress', 0) == 0:
-                            self.sync_results['new_series_started'] += 1
+                # Track statistics from the update result (no redundant API call!)
+                if update_result['was_rewatch']:
+                    self.sync_results['rewatches_detected'] += 1
+                    if update_result['was_completion']:
+                        self.sync_results['rewatches_completed'] += 1
+                elif update_result['was_new_series']:
+                    self.sync_results['new_series_started'] += 1
             else:
                 logger.error(f"❌ Failed to update {anime_title}")
 
-            return success
+            return update_result['success']
 
         except Exception as e:
             logger.error(f"Error processing {series_title}: {e}")
             return False
+
+    def _process_page_episodes(self, episodes: List[Dict]) -> Dict[str, int]:
+        """Process episodes from a single page and return statistics"""
+        page_stats = {
+            'successful_updates': 0,
+            'failed_updates': 0,
+            'skipped_episodes': 0
+        }
+
+        # Group episodes by series-season
+        series_progress = self._group_episodes_by_series_and_season(episodes)
+
+        for (series_title, cr_season), latest_episode in series_progress.items():
+            try:
+                season_display = "Movie" if cr_season == 0 else f"Season {cr_season}"
+                logger.debug(f"Processing: {series_title} ({season_display}) - Episode {latest_episode}")
+
+                if self._process_series_entry(series_title, cr_season, latest_episode):
+                    page_stats['successful_updates'] += 1
+                else:
+                    # Check if it was skipped or failed
+                    # If the entry already exists with same/higher progress, count as skipped
+                    page_stats['skipped_episodes'] += 1
+
+                # Intelligent delay
+                self._intelligent_delay()
+
+            except Exception as e:
+                logger.error(f"Error processing {series_title}: {e}")
+                page_stats['failed_updates'] += 1
+
+        # Update global stats
+        self.sync_results['successful_updates'] += page_stats['successful_updates']
+        self.sync_results['failed_updates'] += page_stats['failed_updates']
+        self.sync_results['skipped_episodes'] += page_stats['skipped_episodes']
+
+        return page_stats
 
     def _search_anime_comprehensive(self, series_title: str) -> List[Dict]:
         """Search AniList and get all related entries (all seasons)"""
@@ -954,6 +1006,36 @@ class SyncManager:
         except Exception as e:
             logger.debug(f"Error in intelligent delay: {e}")
             time.sleep(1.0)  # Safe fallback
+
+    def _needs_update(self, anime_id: int, target_progress: int) -> bool:
+        """
+        Check if an anime entry needs to be updated
+
+        Returns:
+            True if update is needed, False if already up-to-date
+        """
+        try:
+            existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+
+            if not existing_entry:
+                # No entry exists, definitely needs update
+                return True
+
+            current_progress = existing_entry.get('progress', 0)
+
+            # If current progress is already >= target, no update needed
+            if current_progress >= target_progress:
+                logger.debug(f"Anime {anime_id} already at episode {current_progress} "
+                             f"(target: {target_progress}) - skipping")
+                return False
+
+            # Progress is behind, needs update
+            return True
+
+        except Exception as e:
+            logger.debug(f"Error checking update need: {e}")
+            # On error, assume update is needed to be safe
+            return True
 
     def _cleanup(self) -> None:
         """Clean up resources"""
