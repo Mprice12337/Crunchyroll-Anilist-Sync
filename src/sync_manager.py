@@ -127,6 +127,8 @@ class SyncManager:
         """Update AniList progress with smart pagination - fetch and process page by page"""
         logger.info("🎯 Updating AniList with smart pagination...")
 
+        self.watch_history = []
+
         max_pages = self.config.get('max_pages', 10)
         page_num = 0
         total_processed = 0
