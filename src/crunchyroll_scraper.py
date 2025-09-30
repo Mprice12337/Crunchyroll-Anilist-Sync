@@ -91,34 +91,33 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
             return False
 
     def get_watch_history(self, max_pages: int = 10) -> List[Dict[str, Any]]:
-        """Get watch history using Crunchyroll API with token validation"""
+        """
+        Get watch history using Crunchyroll API (fetches all pages)
+
+        Note: Consider using get_watch_history_page() for page-by-page processing
+        """
         logger.info(f"📚 Fetching watch history via API (max {max_pages} pages)...")
 
         if not self.is_authenticated:
             logger.error("Not authenticated! Call authenticate() first.")
             return []
 
-        # Ensure we're on Crunchyroll to maintain session context
-        self.driver.get("https://www.crunchyroll.com")
-        time.sleep(2)
+        all_episodes = []
 
-        # CRITICAL: Ensure we have valid tokens
-        if not self.access_token or not self.cached_account_id:
-            logger.warning("Missing access_token or account_id - requesting new tokens...")
-            account_id = self._get_account_id()
-            if not account_id:
-                logger.error("Could not get account ID from token endpoint")
-                return []
-        else:
-            # We have cached tokens, but validate they still work
-            logger.info(f"✅ Using cached account ID: {self.cached_account_id[:8]}...")
-            if not self._verify_cached_token():
-                logger.error("Cached token validation failed and refresh failed")
-                return []
-            account_id = self.cached_account_id
+        for page_num in range(1, max_pages + 1):
+            page_episodes = self.get_watch_history_page(page_num)
 
-        # Fetch history via browser-based API calls
-        return self._fetch_history_via_browser_api(account_id, max_pages)
+            if not page_episodes:
+                logger.info(f"No more episodes at page {page_num}")
+                break
+
+            all_episodes.extend(page_episodes)
+            logger.info(f"Page {page_num}: {len(page_episodes)} episodes (total: {len(all_episodes)})")
+
+            # Small delay between pages
+            time.sleep(0.3)
+
+        return all_episodes
 
     def _apply_cached_cookies_to_browser(self):
         """NEW METHOD: Apply cached cookies when browser is initialized"""
