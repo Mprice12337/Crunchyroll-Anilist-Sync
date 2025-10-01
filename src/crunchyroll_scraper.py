@@ -339,27 +339,24 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
         try:
             logger.info(f"🚀 Using Crunchyroll API via browser (account: {account_id[:8]}...)")
 
-            for page in range(max_pages):
-                logger.info(f"📄 Fetching page {page + 1}/{max_pages} via browser...")
+            for page in range(1, max_pages + 1):
+                logger.info(f"📄 Fetching page {page}/{max_pages} via browser...")
 
-                start_param = page * page_size if page > 0 else 0
-
+                # KEY FIX: Use 'page' parameter (1-indexed) instead of 'start' parameter
                 # Make API request through browser JavaScript
                 api_response = self.driver.execute_script("""
                     const accountId = arguments[0];
                     const pageSize = arguments[1];
-                    const startParam = arguments[2];
+                    const pageNum = arguments[2];
                     const accessToken = arguments[3];
 
                     const apiUrl = `https://www.crunchyroll.com/content/v2/${accountId}/watch-history`;
                     const params = new URLSearchParams({
+                        locale: 'en-US',
+                        page: pageNum,
                         page_size: pageSize,
-                        locale: 'en-US'
+                        preferred_audio_language: 'ja-JP'
                     });
-
-                    if (startParam > 0) {
-                        params.append('start', startParam);
-                    }
 
                     const headers = {
                         'Accept': 'application/json',
@@ -386,27 +383,27 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
                         return response.json().then(data => ({ success: true, data: data }));
                     })
                     .catch(error => ({ success: false, error: error.message }));
-                """, account_id, page_size, start_param, self.access_token)
+                """, account_id, page_size, page, self.access_token)
 
                 # Handle response
                 if not api_response or not api_response.get('success'):
                     status = api_response.get('status', 'unknown') if api_response else 'no response'
                     error_msg = api_response.get('error', 'unknown error') if api_response else 'no response'
-                    logger.error(f"API page {page + 1} failed: {status} - {error_msg}")
+                    logger.error(f"API page {page} failed: {status} - {error_msg}")
                     break
 
                 data = api_response.get('data', {})
                 items = data.get('data', [])
 
                 if not items:
-                    logger.info(f"No more items at page {page + 1}")
+                    logger.info(f"No more items at page {page}")
                     break
 
                 # Parse episodes from this page
                 page_episodes = self._parse_api_response(items)
                 all_episodes.extend(page_episodes)
 
-                logger.info(f"Page {page + 1}: {len(page_episodes)} valid episodes (total: {len(all_episodes)})")
+                logger.info(f"Page {page}: {len(page_episodes)} valid episodes (total: {len(all_episodes)})")
 
                 # Stop if we got fewer items than page_size (indicating last page)
                 if len(items) < page_size:
@@ -417,7 +414,6 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
 
             # Log final summary
             if all_episodes:
-                #self._log_api_summary(all_episodes)
                 logger.debug(f"Browser-based API scraping completed: {len(all_episodes)} episodes")
             else:
                 logger.warning("No episodes retrieved from browser-based API")
@@ -463,27 +459,27 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
             account_id = self.cached_account_id
 
         try:
-            # Calculate start parameter (0-indexed for API)
-            start_param = (page_num - 1) * page_size if page_num > 1 else 0
-
-            logger.debug(f"Fetching from API: start={start_param}, size={page_size}")
+            logger.debug(f"Fetching from API: page={page_num}, size={page_size}")
 
             # Make API request through browser JavaScript
+            # KEY FIX: Use 'page' parameter instead of 'start' parameter
             api_response = self.driver.execute_script("""
                 const accountId = arguments[0];
                 const pageSize = arguments[1];
-                const startParam = arguments[2];
+                const pageNum = arguments[2];
                 const accessToken = arguments[3];
 
                 const apiUrl = `https://www.crunchyroll.com/content/v2/${accountId}/watch-history`;
                 const params = new URLSearchParams({
+                    locale: 'en-US',
+                    page: pageNum,
                     page_size: pageSize,
-                    locale: 'en-US'
+                    preferred_audio_language: 'ja-JP'
                 });
 
-                if (startParam > 0) {
-                    params.append('start', startParam);
-                }
+                const fullUrl = `${apiUrl}?${params.toString()}`;
+                console.log('[DEBUG] Requesting URL:', fullUrl);
+                console.log('[DEBUG] Page number:', pageNum);
 
                 const headers = {
                     'Accept': 'application/json',
@@ -497,7 +493,7 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
                     headers['Authorization'] = `Bearer ${accessToken}`;
                 }
 
-                return fetch(`${apiUrl}?${params.toString()}`, {
+                return fetch(fullUrl, {
                     method: 'GET',
                     headers: headers,
                     credentials: 'include',
@@ -505,31 +501,59 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
                 })
                 .then(response => {
                     if (!response.ok) {
-                        return { success: false, status: response.status, statusText: response.statusText };
+                        return { success: false, status: response.status, statusText: response.statusText, url: fullUrl };
                     }
-                    return response.json().then(data => ({ success: true, data: data }));
+                    return response.json().then(data => ({ 
+                        success: true, 
+                        data: data,
+                        url: fullUrl,
+                        itemCount: data?.data?.length || 0,
+                        firstItemId: data?.data?.[0]?.id || null,
+                        lastItemId: data?.data?.[data.data.length - 1]?.id || null
+                    }));
                 })
-                .catch(error => ({ success: false, error: error.message }));
-            """, account_id, page_size, start_param, self.access_token)
+                .catch(error => ({ success: false, error: error.message, url: fullUrl }));
+            """, account_id, page_size, page_num, self.access_token)
 
             # Handle response
             if not api_response or not api_response.get('success'):
                 status = api_response.get('status', 'unknown') if api_response else 'no response'
                 error_msg = api_response.get('error', 'unknown error') if api_response else 'no response'
-                logger.error(f"API page {page_num} failed: {status} - {error_msg}")
+                requested_url = api_response.get('url', 'unknown') if api_response else 'unknown'
+                logger.error(f"API request failed: {status} - {error_msg}")
+                logger.error(f"Requested URL: {requested_url}")
                 return []
+
+            # Log what we actually got from the API
+            requested_url = api_response.get('url', 'unknown')
+            item_count = api_response.get('itemCount', 0)
+            first_id = api_response.get('firstItemId', 'none')
+            last_id = api_response.get('lastItemId', 'none')
+
+            logger.info(f"📡 API Response for page {page_num}:")
+            logger.info(f"   URL: {requested_url}")
+            logger.info(f"   Items returned: {item_count}")
+            logger.info(f"   First item ID: {first_id}")
+            logger.info(f"   Last item ID: {last_id}")
 
             data = api_response.get('data', {})
             items = data.get('data', [])
 
             if not items:
-                logger.debug(f"No items found on page {page_num}")
+                logger.debug(f"No items returned for page {page_num}")
                 return []
 
             # Parse episodes from this page
             page_episodes = self._parse_api_response(items)
 
-            logger.debug(f"Page {page_num}: parsed {len(page_episodes)} valid episodes")
+            # Log first and last episode titles for verification
+            if page_episodes:
+                first_ep = page_episodes[0]
+                last_ep = page_episodes[-1]
+                logger.info(f"   First episode: {first_ep.get('series_title')} - E{first_ep.get('episode_number')}")
+                logger.info(f"   Last episode: {last_ep.get('series_title')} - E{last_ep.get('episode_number')}")
+
+            logger.info(f"✅ Page {page_num}: Retrieved {len(page_episodes)} episodes")
 
             return page_episodes
 
