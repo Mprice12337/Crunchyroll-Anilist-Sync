@@ -1,5 +1,5 @@
 """
-Simplified cache management for authentication and data
+Cache Management for Authentication and Application Data
 """
 
 import json
@@ -10,24 +10,20 @@ from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
+
 class CacheManager:
-    """Manages caching for authentication and application data"""
+    """Manages persistent caching for authentication and application data"""
 
     def __init__(self, cache_dir: str = "_cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-
-        # Cache files
         self.auth_cache_file = self.cache_dir / "auth_cache.json"
         self.data_cache_file = self.cache_dir / "data_cache.json"
 
     def clear_all_cache(self) -> None:
-        """Clear all cache files"""
+        """Remove all cache files"""
         try:
-            cache_files = [
-                self.auth_cache_file,
-                self.data_cache_file
-            ]
+            cache_files = [self.auth_cache_file, self.data_cache_file]
 
             for cache_file in cache_files:
                 if cache_file.exists():
@@ -40,7 +36,7 @@ class CacheManager:
             logger.error(f"Error clearing cache: {e}")
 
     def save_crunchyroll_auth(self, cookies: List[Dict], **kwargs) -> bool:
-        """Save Crunchyroll authentication data"""
+        """Save Crunchyroll authentication data with 30-day expiration"""
         try:
             auth_data = self._load_auth_cache()
 
@@ -58,7 +54,7 @@ class CacheManager:
             return False
 
     def load_crunchyroll_auth(self) -> Optional[Dict[str, Any]]:
-        """Load Crunchyroll authentication data"""
+        """Load Crunchyroll authentication data if not expired"""
         try:
             auth_data = self._load_auth_cache()
             cr_auth = auth_data.get('crunchyroll')
@@ -66,7 +62,6 @@ class CacheManager:
             if not cr_auth:
                 return None
 
-            # Check expiration
             expires_at = datetime.fromisoformat(cr_auth.get('expires_at', '2000-01-01'))
             if datetime.now() > expires_at:
                 logger.info("Crunchyroll auth cache expired")
@@ -80,7 +75,7 @@ class CacheManager:
             return None
 
     def clear_crunchyroll_auth(self) -> bool:
-        """Clear Crunchyroll authentication cache"""
+        """Remove Crunchyroll authentication from cache"""
         try:
             auth_data = self._load_auth_cache()
             auth_data.pop('crunchyroll', None)
@@ -91,7 +86,7 @@ class CacheManager:
             return False
 
     def save_anilist_auth(self, access_token: str, user_id: int, user_name: str) -> bool:
-        """Save AniList authentication data"""
+        """Save AniList authentication data with 1-year expiration"""
         try:
             auth_data = self._load_auth_cache()
 
@@ -110,7 +105,7 @@ class CacheManager:
             return False
 
     def load_anilist_auth(self) -> Optional[Dict[str, Any]]:
-        """Load AniList authentication data"""
+        """Load AniList authentication data if not expired"""
         try:
             auth_data = self._load_auth_cache()
             al_auth = auth_data.get('anilist')
@@ -118,7 +113,6 @@ class CacheManager:
             if not al_auth:
                 return None
 
-            # Check expiration
             expires_at = datetime.fromisoformat(al_auth.get('expires_at', '2000-01-01'))
             if datetime.now() > expires_at:
                 logger.info("AniList auth cache expired")
@@ -132,7 +126,7 @@ class CacheManager:
             return None
 
     def clear_anilist_auth(self) -> bool:
-        """Clear AniList authentication cache"""
+        """Remove AniList authentication from cache"""
         try:
             auth_data = self._load_auth_cache()
             auth_data.pop('anilist', None)
@@ -143,7 +137,7 @@ class CacheManager:
             return False
 
     def save_anime_mapping(self, crunchyroll_title: str, anilist_data: Dict) -> None:
-        """Save anime title mapping"""
+        """Cache anime title mapping for faster lookups"""
         try:
             data_cache = self._load_data_cache()
 
@@ -161,14 +155,13 @@ class CacheManager:
             logger.error(f"Error saving anime mapping: {e}")
 
     def get_anime_mapping(self, crunchyroll_title: str) -> Optional[Dict]:
-        """Get cached anime mapping"""
+        """Retrieve cached anime mapping if recent (within 30 days)"""
         try:
             data_cache = self._load_data_cache()
             mappings = data_cache.get('anime_mappings', {})
 
             mapping = mappings.get(crunchyroll_title)
             if mapping:
-                # Check if mapping is recent (30 days)
                 timestamp = datetime.fromisoformat(mapping.get('timestamp', '2000-01-01'))
                 if datetime.now() - timestamp < timedelta(days=30):
                     return mapping.get('anilist_data')
@@ -180,7 +173,7 @@ class CacheManager:
             return None
 
     def _load_auth_cache(self) -> Dict[str, Any]:
-        """Load authentication cache from file"""
+        """Load authentication cache from disk"""
         try:
             if self.auth_cache_file.exists():
                 with open(self.auth_cache_file, 'r', encoding='utf-8') as f:
@@ -192,7 +185,7 @@ class CacheManager:
             return {}
 
     def _save_auth_cache(self, data: Dict[str, Any]) -> bool:
-        """Save authentication cache to file"""
+        """Save authentication cache to disk"""
         try:
             with open(self.auth_cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -203,7 +196,7 @@ class CacheManager:
             return False
 
     def _load_data_cache(self) -> Dict[str, Any]:
-        """Load data cache from file"""
+        """Load data cache from disk"""
         try:
             if self.data_cache_file.exists():
                 with open(self.data_cache_file, 'r', encoding='utf-8') as f:
@@ -215,7 +208,7 @@ class CacheManager:
             return {}
 
     def _save_data_cache(self, data: Dict[str, Any]) -> bool:
-        """Save data cache to file"""
+        """Save data cache to disk"""
         try:
             with open(self.data_cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -225,8 +218,9 @@ class CacheManager:
             logger.error(f"Error saving data cache: {e}")
             return False
 
+
 class AuthCache:
-    """Compatibility wrapper for the old AuthCache interface"""
+    """Backward compatibility wrapper for legacy code using AuthCache interface"""
 
     def __init__(self, cache_dir: str = "_cache"):
         self._cache_manager = CacheManager(cache_dir)

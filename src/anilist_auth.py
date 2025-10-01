@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class AniListAuth:
-    """AniList OAuth authentication handler"""
+    """Handles AniList OAuth authentication with caching support"""
 
     def __init__(self, client_id: str, client_secret: str):
         self.client_id = client_id
@@ -26,10 +26,9 @@ class AniListAuth:
         self.cache_manager = CacheManager()
 
     def authenticate(self) -> bool:
-        """Authenticate with AniList using OAuth"""
+        """Authenticate with AniList using OAuth flow"""
         logger.info("🔐 Authenticating with AniList...")
 
-        # Try cached authentication first
         if self._try_cached_auth():
             logger.info("✅ Using cached AniList authentication")
             return True
@@ -37,10 +36,8 @@ class AniListAuth:
         logger.info("Performing OAuth authentication...")
 
         try:
-            # Step 1: Get authorization code
             auth_url = self._get_authorization_url()
             logger.info(f"🔗 Opening authorization URL: {auth_url}")
-
             webbrowser.open(auth_url)
 
             auth_code = input("\n📋 Please enter the authorization code: ").strip()
@@ -48,19 +45,15 @@ class AniListAuth:
                 logger.error("No authorization code provided")
                 return False
 
-            # Step 2: Exchange code for access token
             if not self._exchange_code_for_token(auth_code):
                 logger.error("Failed to exchange code for token")
                 return False
 
-            # Step 3: Get user information
             if not self._get_user_info():
                 logger.error("Failed to get user information")
                 return False
 
-            # Step 4: Cache successful authentication
             self._cache_authentication()
-
             logger.info(f"✅ Successfully authenticated as: {self.user_name}")
             return True
 
@@ -68,27 +61,28 @@ class AniListAuth:
             logger.error(f"AniList authentication failed: {e}")
             return False
 
+    def is_authenticated(self) -> bool:
+        """Check if currently authenticated"""
+        return bool(self.access_token and self.user_id and self.user_name)
+
     def _try_cached_auth(self) -> bool:
-        """Try to use cached authentication"""
+        """Attempt to use cached authentication credentials"""
         cached_auth = self.cache_manager.load_anilist_auth()
         if not cached_auth:
             return False
 
-        # Set auth data from cache
         self.access_token = cached_auth.get('access_token')
         self.user_id = cached_auth.get('user_id')
         self.user_name = cached_auth.get('user_name')
 
-        # Test if the cached token still works
         if self._test_authentication():
             return True
         else:
-            # Clear invalid cache
             self.cache_manager.clear_anilist_auth()
             return False
 
     def _test_authentication(self) -> bool:
-        """Test if current authentication is valid"""
+        """Verify that current authentication is still valid"""
         try:
             query = """
             query {
@@ -98,12 +92,10 @@ class AniListAuth:
                 }
             }
             """
-
             result = self._execute_auth_query(query)
             return result and 'data' in result and 'Viewer' in result['data']
 
         except Exception as e:
-            logger.debug(f"Auth test failed: {e}")
             return False
 
     def _get_authorization_url(self) -> str:
@@ -151,7 +143,7 @@ class AniListAuth:
             return False
 
     def _get_user_info(self) -> bool:
-        """Get user information using the access token"""
+        """Retrieve user information using the access token"""
         try:
             query = """
             query {
@@ -181,7 +173,7 @@ class AniListAuth:
             return False
 
     def _cache_authentication(self) -> None:
-        """Cache current authentication state"""
+        """Save current authentication state to cache"""
         try:
             if self.access_token and self.user_id and self.user_name:
                 self.cache_manager.save_anilist_auth(
@@ -189,16 +181,11 @@ class AniListAuth:
                     user_id=self.user_id,
                     user_name=self.user_name
                 )
-                logger.debug("AniList authentication cached successfully")
         except Exception as e:
             logger.error(f"Error caching AniList authentication: {e}")
 
-    def is_authenticated(self) -> bool:
-        """Check if currently authenticated"""
-        return bool(self.access_token and self.user_id and self.user_name)
-
     def _execute_auth_query(self, query: str) -> Optional[dict]:
-        """Execute a simple GraphQL query for authentication purposes"""
+        """Execute a GraphQL query for authentication purposes"""
         try:
             headers = {
                 'Content-Type': 'application/json',
@@ -223,9 +210,7 @@ class AniListAuth:
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.debug(f"Auth query failed: {response.status_code}")
                 return None
 
         except Exception as e:
-            logger.debug(f"Error in auth query: {e}")
             return None

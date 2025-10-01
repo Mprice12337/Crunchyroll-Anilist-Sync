@@ -1,5 +1,5 @@
 """
-Enhanced AniList client - main orchestrating class with rewatch support
+AniList Client - Orchestrates authentication and API operations with rewatch support
 """
 
 import logging
@@ -12,13 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class AniListClient:
-    """Enhanced AniList client that orchestrates authentication and API operations with rewatch support"""
+    """High-level AniList client with intelligent rewatch detection"""
 
     def __init__(self, client_id: str, client_secret: str):
         self.client_id = client_id
         self.client_secret = client_secret
-
-        # Initialize components
         self.auth = AniListAuth(client_id, client_secret)
         self.api = AniListAPI()
 
@@ -26,8 +24,12 @@ class AniListClient:
         """Authenticate with AniList using OAuth"""
         return self.auth.authenticate()
 
+    def is_authenticated(self) -> bool:
+        """Check if currently authenticated"""
+        return self.auth.is_authenticated()
+
     def search_anime(self, title: str) -> Optional[List[Dict[str, Any]]]:
-        """Search for anime by title with rate limiting"""
+        """Search for anime by title"""
         if not self.auth.is_authenticated():
             logger.error("Not authenticated! Call authenticate() first.")
             return None
@@ -44,7 +46,7 @@ class AniListClient:
 
     def update_anime_progress(self, anime_id: int, progress: int, status: Optional[str] = None,
                              repeat: Optional[int] = None) -> bool:
-        """Update anime progress on AniList with rate limiting and rewatch support"""
+        """Update anime progress on AniList"""
         if not self.auth.is_authenticated():
             logger.error("Not authenticated! Call authenticate() first.")
             return False
@@ -56,8 +58,16 @@ class AniListClient:
         """
         Update anime progress with intelligent rewatch detection
 
+        Automatically detects when a user is rewatching a completed series and
+        handles the progress update appropriately.
+
+        Args:
+            anime_id: AniList media ID
+            progress: Current episode number
+            total_episodes: Total episodes in the series (if known)
+
         Returns:
-            dict: Update result with statistics
+            Dictionary with update statistics:
                 {
                     'success': bool,
                     'was_rewatch': bool,
@@ -76,129 +86,84 @@ class AniListClient:
                 'repeat_count': 0
             }
 
+        result = {
+            'success': False,
+            'was_rewatch': False,
+            'was_completion': False,
+            'was_new_series': False,
+            'repeat_count': 0
+        }
+
         try:
-            # Get current list entry to check existing status
             existing_entry = self.get_anime_list_entry(anime_id)
 
-            # Initialize result tracking
-            result = {
-                'success': False,
-                'was_rewatch': False,
-                'was_completion': False,
-                'was_new_series': False,
-                'repeat_count': 0
-            }
-
             if existing_entry:
-                current_status = existing_entry.get('status')
-                current_progress = existing_entry.get('progress', 0)
-                current_repeat = existing_entry.get('repeat', 0)
+                if self._is_rewatch_scenario(existing_entry, progress, total_episodes):
+                    result['was_rewatch'] = True
+                    result['repeat_count'] = existing_entry.get('repeat', 0)
 
-                result['repeat_count'] = current_repeat
-
-                logger.debug(f"Anime {anime_id} - Current: {current_status} {current_progress}/{total_episodes or '?'} "
-                             f"(repeat: {current_repeat}) → Updating to: {progress}")
-
-                # Determine if this is a rewatch scenario
-                is_rewatch = self._is_rewatch_scenario(existing_entry, progress, total_episodes)
-                result['was_rewatch'] = is_rewatch
-
-                if is_rewatch:
-                    success = self._handle_rewatch_update(anime_id, progress, existing_entry, total_episodes)
-                    result['success'] = success
-
-                    # Check if this was a rewatch completion
-                    if success and total_episodes and progress >= total_episodes:
+                    if total_episodes and progress >= total_episodes:
                         result['was_completion'] = True
-                        result['repeat_count'] = current_repeat + 1
+                        result['repeat_count'] += 1
+
+                    success = self._handle_rewatch_update(anime_id, progress, existing_entry, total_episodes)
                 else:
-                    # Check if this is a new series
-                    if current_status in ['PLANNING', None] or current_progress == 0:
+                    current_status = existing_entry.get('status')
+                    if current_status in ['PLANNING', None] or existing_entry.get('progress', 0) == 0:
                         result['was_new_series'] = True
 
-                    success = self._handle_normal_update(anime_id, progress, existing_entry, total_episodes)
-                    result['success'] = success
-
-                    # Check if we just completed it
-                    if success and total_episodes and progress >= total_episodes:
+                    if total_episodes and progress >= total_episodes:
                         result['was_completion'] = True
-            else:
-                # No existing entry, treat as new watch
-                logger.debug(f"Anime {anime_id} - No existing entry, treating as new watch (episode {progress})")
-                result['was_new_series'] = True
-                success = self._handle_new_watch(anime_id, progress, total_episodes)
-                result['success'] = success
 
-                if success and total_episodes and progress >= total_episodes:
+                    success = self._handle_normal_update(anime_id, progress, existing_entry, total_episodes)
+            else:
+                result['was_new_series'] = True
+                if total_episodes and progress >= total_episodes:
                     result['was_completion'] = True
 
+                success = self._handle_new_watch(anime_id, progress, total_episodes)
+
+            result['success'] = success
             return result
 
         except Exception as e:
-            logger.error(f"Error in rewatch logic for anime {anime_id}: {e}")
-            return {
-                'success': False,
-                'was_rewatch': False,
-                'was_completion': False,
-                'was_new_series': False,
-                'repeat_count': 0
-            }
+            logger.error(f"Error in rewatch logic: {e}")
+            return result
 
-    def _is_rewatch_scenario(self, existing_entry: Dict[str, Any], new_progress: int,
-                           total_episodes: Optional[int]) -> bool:
-        """Determine if this update represents a rewatch scenario"""
+    def _is_rewatch_scenario(self, existing_entry: Dict[str, Any], progress: int,
+                            total_episodes: Optional[int]) -> bool:
+        """
+        Determine if this is a rewatch scenario
+
+        A rewatch is detected when:
+        - Series was previously COMPLETED
+        - New progress is less than what was previously watched
+        - Or new progress is at episode 1 of a completed series
+        """
         current_status = existing_entry.get('status')
         current_progress = existing_entry.get('progress', 0)
 
-        # FIXED: If progress is the same, this is likely just a duplicate update, not a rewatch
-        if current_progress == new_progress:
-            logger.debug(f"Same progress ({current_progress} == {new_progress}), not a rewatch")
+        if current_status != 'COMPLETED':
             return False
 
-        # FIXED: If we're making normal forward progress, it's not a rewatch
-        if new_progress > current_progress and (new_progress - current_progress) <= 5:
-            logger.debug(f"Normal forward progress ({current_progress} → {new_progress}), not a rewatch")
-            return False
-
-        # If the user has completed the series and we're updating with episode 1 or early episodes,
-        # AND it's a significant step backwards, this is likely a rewatch
-        if current_status == 'COMPLETED' and current_progress > 0:
-            if new_progress <= 3 and current_progress > 10:  # Must be significant backwards step
-                logger.info("🔄 Detected rewatch: completed series, starting from beginning")
-                return True
-
-        # If the user has significant progress and we're updating with episode 1,
-        # AND it's not just a small adjustment, this might be a rewatch
-        if current_progress > 10 and new_progress <= 3:
-            logger.info("🔄 Detected potential rewatch: significant progress reset to beginning")
-            return True
-
-        # FIXED: Only detect rewatch completion if we're completing AGAIN after already being completed
-        # and the progress actually changed backwards first (indicating a rewatch was started)
-        if (current_status == 'COMPLETED' and total_episodes and
-            new_progress >= total_episodes and current_progress < total_episodes):
-            logger.info("🔄 Detected rewatch completion")
+        if progress < current_progress or progress == 1:
+            logger.info(f"🔄 Rewatch detected: {existing_entry.get('media', {}).get('title', {}).get('romaji', 'Unknown')}")
             return True
 
         return False
 
     def _handle_rewatch_update(self, anime_id: int, progress: int, existing_entry: Dict[str, Any],
                              total_episodes: Optional[int]) -> bool:
-        """Handle updates for rewatch scenarios"""
+        """Handle progress updates for rewatch scenarios"""
         current_repeat = existing_entry.get('repeat', 0)
 
-        # If we're completing a rewatch, increment the repeat count
         if total_episodes and progress >= total_episodes:
             new_repeat = current_repeat + 1
             status = 'COMPLETED'
-
             logger.info(f"🏁 Completing rewatch #{new_repeat}")
             return self.update_anime_progress(anime_id, progress, status, new_repeat)
         else:
-            # We're in the middle of a rewatch, mark as CURRENT (watching)
             status = 'CURRENT'
-
-            # Don't increment repeat count until completion
             logger.info(f"📺 Continuing rewatch (episode {progress})")
             return self.update_anime_progress(anime_id, progress, status, current_repeat)
 
@@ -209,35 +174,28 @@ class AniListClient:
         current_progress = existing_entry.get('progress', 0)
         current_repeat = existing_entry.get('repeat', 0)
 
-        # FIXED: Determine status more intelligently
         if total_episodes and progress >= total_episodes:
-            # Only mark as completed if we're actually completing it (not already completed)
             if current_status != 'COMPLETED' or current_progress < total_episodes:
                 status = 'COMPLETED'
                 logger.info(f"🏁 Completing series (episode {progress}/{total_episodes})")
             else:
-                # Already completed with same progress - this is likely a duplicate update
-                status = current_status  # Keep existing status
+                status = current_status
                 logger.info(f"✅ Series already completed, maintaining status (episode {progress}/{total_episodes})")
         else:
-            # FIXED: Better status logic for in-progress updates
             if current_status in ['PLANNING', 'PAUSED']:
-                status = 'CURRENT'  # Start watching
+                status = 'CURRENT'
                 logger.info(f"▶️ Starting to watch (episode {progress})")
             elif current_status == 'COMPLETED':
-                # This shouldn't happen in normal updates (would be rewatch)
                 status = 'CURRENT'
                 logger.info(f"📺 Resuming completed series (episode {progress})")
             else:
-                status = 'CURRENT'  # Continue watching
+                status = 'CURRENT'
                 logger.info(f"📺 Updating progress (episode {progress})")
 
-        # Keep existing repeat count for normal updates
         return self.update_anime_progress(anime_id, progress, status, current_repeat)
 
     def _handle_new_watch(self, anime_id: int, progress: int, total_episodes: Optional[int]) -> bool:
         """Handle updates for new anime (no existing entry)"""
-        # Determine status based on progress
         if total_episodes and progress >= total_episodes:
             status = 'COMPLETED'
             logger.info(f"🏁 Completing new series (episode {progress}/{total_episodes})")
@@ -245,7 +203,6 @@ class AniListClient:
             status = 'CURRENT'
             logger.info(f"📺 Starting new series (episode {progress})")
 
-        # New watch, so repeat count is 0 (don't need to specify it)
         return self.update_anime_progress(anime_id, progress, status)
 
     @property
@@ -267,7 +224,3 @@ class AniListClient:
     def rate_limiter(self):
         """Access to rate limiter for status reporting"""
         return self.api.rate_limiter
-
-    def is_authenticated(self) -> bool:
-        """Check if currently authenticated"""
-        return self.auth.is_authenticated()

@@ -1,5 +1,5 @@
 """
-Enhanced anime title matching with dynamic season detection
+Anime Title Matching with Season Detection
 """
 
 import re
@@ -9,54 +9,48 @@ from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
+
 class AnimeMatcher:
-    """Dynamic anime matcher without hardcoded data"""
+    """Matches anime titles between Crunchyroll and AniList with season awareness"""
 
     def __init__(self, similarity_threshold: float = 0.8):
         self.similarity_threshold = similarity_threshold
-
-        # Movie format types in AniList
         self.movie_formats = ['MOVIE', 'SPECIAL', 'OVA', 'ONA']
 
     def find_best_match_with_season(self, target_title: str, candidates: List[Dict[str, Any]],
                                    target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int]]:
         """
-        Find best match with season awareness
-        Returns: (match, similarity, matched_season)
+        Find best anime match with season awareness
+
+        Args:
+            target_title: Title to search for
+            candidates: List of AniList entries to match against
+            target_season: Expected season number (0 for movies)
+
+        Returns:
+            Tuple of (matched_entry, similarity_score, detected_season) or None
         """
         if not target_title or not candidates:
             return None
 
-        # Handle movies (season 0) differently
         if target_season == 0:
             return self._find_best_movie_match(target_title, candidates)
-
-        logger.debug(f"Matching '{target_title}' for season {target_season}")
 
         best_match = None
         best_similarity = 0.0
         best_season = target_season
 
-        # Clean target for better matching
-        base_title = self._extract_base_title(target_title)
-
         for candidate in candidates:
-            # Skip movies for regular matching
             format_type = (candidate.get('format', '') or '').upper()
             if format_type in self.movie_formats:
                 continue
 
-            # Calculate similarity
             similarity = self._calculate_title_similarity(target_title, candidate)
-
-            # Detect season from candidate
             detected_season = self._detect_season_from_entry(candidate)
 
-            # Bonus for matching target season
             if detected_season == target_season:
                 similarity += 0.1
 
-            # Update best match if this is better
             if similarity > best_similarity and similarity >= self.similarity_threshold:
                 best_similarity = similarity
                 best_match = candidate
@@ -69,11 +63,27 @@ class AnimeMatcher:
 
         return None
 
-    def _find_best_movie_match(self, target_title: str, candidates: List[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], float, int]]:
-        """Find best match for movies/specials"""
-        logger.debug(f"Looking for movie match for: {target_title}")
+    def find_best_match(self, target_title: str, candidates: List[Dict[str, Any]],
+                       target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float]]:
+        """Legacy compatibility method without season return"""
+        result = self.find_best_match_with_season(target_title, candidates, target_season)
+        if result:
+            match, similarity, _ = result
+            return match, similarity
+        return None
 
-        # Clean the target title
+    def find_best_match_with_episode_validation(self, target_title: str, target_episode: int,
+                                               candidates: List[Dict[str, Any]],
+                                               estimated_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
+        """Legacy compatibility with episode validation"""
+        result = self.find_best_match_with_season(target_title, candidates, estimated_season)
+        if result:
+            match, similarity, season = result
+            return match, similarity, season, target_episode
+        return None
+
+    def _find_best_movie_match(self, target_title: str, candidates: List[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], float, int]]:
+        """Find best match for movies and specials"""
         clean_target = re.sub(r'\s*-?\s*movie\s*', '', target_title, flags=re.IGNORECASE)
         clean_target = re.sub(r'\s*-?\s*0\s*$', '', clean_target)
 
@@ -81,14 +91,12 @@ class AnimeMatcher:
         best_similarity = 0.0
 
         for candidate in candidates:
-            # Only consider actual movies/specials
             format_type = (candidate.get('format', '') or '').upper()
             if format_type not in self.movie_formats:
                 continue
 
             similarity = self._calculate_title_similarity(clean_target, candidate)
 
-            # Small bonus for movie format
             if format_type == 'MOVIE':
                 similarity += 0.05
 
@@ -105,19 +113,15 @@ class AnimeMatcher:
         return None
 
     def _detect_season_from_entry(self, entry: Dict) -> int:
-        """Detect season number from AniList entry"""
-        import re
-
+        """Detect season number from AniList entry title"""
         title_obj = entry.get('title', {})
         romaji = title_obj.get('romaji', '')
         english = title_obj.get('english', '')
 
-        # Check both titles for season indicators
         for title in [romaji, english]:
             if not title:
                 continue
 
-            # Season patterns
             patterns = [
                 (r'(\d+)(?:st|nd|rd|th)\s+Season', lambda m: int(m.group(1))),
                 (r'Season\s+(\d+)', lambda m: int(m.group(1))),
@@ -132,7 +136,7 @@ class AnimeMatcher:
                     if 1 <= season <= 10:
                         return season
 
-        return 1  # Default to season 1
+        return 1
 
     def _roman_to_int(self, match) -> int:
         """Convert Roman numerals to integers"""
@@ -143,14 +147,13 @@ class AnimeMatcher:
         """Extract base title without season indicators"""
         base = title
 
-        # Remove season indicators
         patterns_to_remove = [
             r'Season\s*\d+',
             r'\d+(?:st|nd|rd|th)?\s*Season',
             r'\bS\d+\b',
             r'Part\s*\d+',
             r'\b(?:II|III|IV|V|VI)\b',
-            r'\s+\d+$',  # Trailing numbers
+            r'\s+\d+$',
         ]
 
         for pattern in patterns_to_remove:
@@ -159,11 +162,9 @@ class AnimeMatcher:
         return base.strip()
 
     def _calculate_title_similarity(self, target_title: str, candidate: Dict[str, Any]) -> float:
-        """Calculate similarity between target title and candidate"""
+        """Calculate similarity score between target and candidate titles"""
         target_normalized = self._normalize_title(target_title)
         target_base = self._extract_base_title(target_normalized)
-
-        # Also prepare space-removed versions for comparison
         target_no_space = target_normalized.replace(' ', '')
 
         max_similarity = 0.0
@@ -175,23 +176,19 @@ class AnimeMatcher:
                 candidate_base = self._extract_base_title(candidate_normalized)
                 candidate_no_space = candidate_normalized.replace(' ', '')
 
-                # Compare both full and base titles
                 full_similarity = self._calculate_string_similarity(target_normalized, candidate_normalized)
                 base_similarity = self._calculate_string_similarity(target_base, candidate_base)
 
-                # Also check space-removed similarity for cases like "DAN DA DAN" -> "DANDADAN"
                 space_removed_similarity = 0.0
                 if target_no_space != target_normalized or candidate_no_space != candidate_normalized:
                     space_removed_similarity = self._calculate_string_similarity(target_no_space, candidate_no_space)
 
-                    # If the space-removed version is a perfect or near-perfect match, boost significantly
                     if space_removed_similarity >= 0.95:
-                        space_removed_similarity = 1.0  # Treat as perfect match
+                        space_removed_similarity = 1.0
 
-                # Weight base similarity higher for series matching, but also consider space-removed
                 combined_similarity = max(
                     (base_similarity * 0.7) + (full_similarity * 0.3),
-                    space_removed_similarity  # Use space-removed if it's better
+                    space_removed_similarity
                 )
 
                 max_similarity = max(max_similarity, combined_similarity)
@@ -199,23 +196,19 @@ class AnimeMatcher:
         return max_similarity
 
     def _calculate_string_similarity(self, str1: str, str2: str) -> float:
-        """Calculate similarity between two strings"""
+        """Calculate similarity between two strings using multiple methods"""
         if not str1 or not str2:
             return 0.0
 
-        # Exact match
         if str1 == str2:
             return 1.0
 
-        # Substring matches
         if str1 in str2 or str2 in str1:
             shorter, longer = (str1, str2) if len(str1) < len(str2) else (str2, str1)
             return max(0.9, len(shorter) / len(longer))
 
-        # Fuzzy matching
         sequence_similarity = SequenceMatcher(None, str1, str2).ratio()
 
-        # Word-based similarity
         words1 = set(str1.split())
         words2 = set(str2.split())
 
@@ -239,7 +232,7 @@ class AnimeMatcher:
         return final_similarity
 
     def _extract_titles(self, anime: Dict[str, Any]) -> List[str]:
-        """Extract all possible titles from anime data"""
+        """Extract all possible titles from anime entry"""
         titles = []
 
         title_obj = anime.get('title', {})
@@ -251,7 +244,6 @@ class AnimeMatcher:
         elif isinstance(title_obj, str):
             titles.append(title_obj)
 
-        # Add synonyms if available
         synonyms = anime.get('synonyms', [])
         if synonyms:
             titles.extend(synonyms)
@@ -259,7 +251,7 @@ class AnimeMatcher:
         return [title for title in titles if title]
 
     def _get_primary_title(self, anime: Dict[str, Any]) -> str:
-        """Get the primary title for display"""
+        """Get the primary display title"""
         title_obj = anime.get('title', {})
         if isinstance(title_obj, dict):
             return (title_obj.get('romaji') or
@@ -276,38 +268,16 @@ class AnimeMatcher:
 
         normalized = title.lower()
 
-        # Remove common metadata
         patterns_to_remove = [
             r'\s*\(dub\)\s*',
             r'\s*\(sub\)\s*',
-            r'\s*\(\d{4}\)\s*$',  # Year
-            r'[^\w\s\-:!?]',  # Special characters
+            r'\s*\(\d{4}\)\s*$',
+            r'[^\w\s\-:!?]',
         ]
 
         for pattern in patterns_to_remove:
             normalized = re.sub(pattern, ' ', normalized)
 
-        # Normalize whitespace
         normalized = re.sub(r'\s+', ' ', normalized).strip()
 
         return normalized
-
-    # Backward compatibility methods
-    def find_best_match(self, target_title: str, candidates: List[Dict[str, Any]],
-                       target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float]]:
-        """Legacy compatibility method"""
-        result = self.find_best_match_with_season(target_title, candidates, target_season)
-        if result:
-            match, similarity, _ = result
-            return match, similarity
-        return None
-
-    def find_best_match_with_episode_validation(self, target_title: str, target_episode: int,
-                                               candidates: List[Dict[str, Any]],
-                                               estimated_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
-        """Legacy compatibility with episode validation"""
-        result = self.find_best_match_with_season(target_title, candidates, estimated_season)
-        if result:
-            match, similarity, season = result
-            return match, similarity, season, target_episode
-        return None

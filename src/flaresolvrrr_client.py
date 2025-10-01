@@ -1,5 +1,5 @@
 """
-Simple FlareSolverr client for Cloudflare bypass
+FlareSolverr client for Cloudflare bypass
 """
 
 import logging
@@ -80,7 +80,7 @@ class FlareSolverrClient:
 
                 if result.get("status") == "ok":
                     solution = result.get("solution", {})
-                    logger.info("✅ FlareSolverr request successful")
+                    logger.info("FlareSolverr request successful")
 
                     return {
                         'response': solution.get('response', ''),

@@ -1,80 +1,310 @@
 """
-Crunchyroll Auth Handler
+Crunchyroll Authentication Handler
+Manages authentication, token management, and session caching for Crunchyroll API access.
 """
 
 import time
 import logging
-from typing import List, Dict, Optional
+import uuid
+import hashlib
+import requests
+from typing import Dict, Optional, List
+from pathlib import Path
+from bs4 import BeautifulSoup
 
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 
-from flaresolvrrr_client import FlareSolverrClient
+from cache_manager import AuthCache
 
 logger = logging.getLogger(__name__)
 
 
 class CrunchyrollAuth:
-    """Crunchyroll authentication handler"""
+    """Handles Crunchyroll authentication and token management"""
 
-    # ==================== AUTHENTICATION METHODS ====================
+    def _perform_fresh_authentication(self) -> bool:
+        """Perform fresh authentication with Crunchyroll"""
+        logger.info("🔐 Performing fresh authentication...")
 
-    def _verify_cached_token(self) -> bool:
-        """Verify that cached access token is still valid, refresh if needed"""
-        if not self.access_token or not self.cached_account_id:
-            logger.debug("No cached token to verify")
+        if self.flaresolverr_url:
+            logger.info("Using FlareSolverr for authentication")
+            if self._authenticate_via_flaresolverr():
+                return True
+
+        if not self._authenticate_via_browser():
+            logger.error("Browser authentication failed")
             return False
 
-        # OPTIMIZATION: Check token age first to avoid unnecessary API call
-        if self._should_refresh_token():
-            logger.info("🔄 Token age threshold reached, refreshing preemptively...")
-            return self._refresh_access_token()
+        self._capture_tokens_post_login()
+        self._cache_authentication()
+        return True
 
+    def _authenticate_via_browser(self) -> bool:
+        """Authenticate using browser automation"""
         try:
-            logger.debug("Verifying cached access token...")
+            self.driver.get("https://www.crunchyroll.com/login")
+            time.sleep(3)
 
-            # Test the cached token with a simple API call
-            test_response = self.driver.execute_script("""
-                const accessToken = arguments[0];
-                const accountId = arguments[1];
+            if not self._handle_cloudflare_challenge():
+                logger.warning("Cloudflare challenge handling timeout")
 
-                return fetch(`https://www.crunchyroll.com/content/v2/${accountId}/watch-history?page_size=1&locale=en-US`, {
-                    method: 'GET',
+            wait = WebDriverWait(self.driver, 20)
+
+            email_field = self._find_form_field(wait, [
+                'input[type="email"]',
+                'input[name="email"]',
+                '#email'
+            ])
+
+            password_field = self._find_form_field(wait, [
+                'input[type="password"]',
+                'input[name="password"]',
+                '#password'
+            ])
+
+            if not email_field or not password_field:
+                logger.error("Could not locate login form fields")
+                return False
+
+            email_field.clear()
+            email_field.send_keys(self.email)
+            time.sleep(1)
+
+            password_field.clear()
+            password_field.send_keys(self.password)
+            time.sleep(1)
+
+            submit_button = self._find_form_field(wait, [
+                'button[type="submit"]',
+                'button.submit-button',
+                'input[type="submit"]'
+            ], wait_for_presence=False)
+
+            if submit_button:
+                submit_button.click()
+            else:
+                password_field.submit()
+
+            time.sleep(5)
+
+            if "login" in self.driver.current_url.lower():
+                logger.error("Still on login page after submission")
+                return False
+
+            logger.info("✅ Browser authentication successful")
+            return True
+
+        except Exception as e:
+            logger.error(f"Browser authentication error: {e}")
+            return False
+
+    def _authenticate_via_flaresolverr(self) -> bool:
+        """Authenticate using FlareSolverr proxy"""
+        try:
+            flaresolverr_data = {
+                "cmd": "request.post",
+                "url": "https://www.crunchyroll.com/login",
+                "postData": f"email={self.email}&password={self.password}",
+                "maxTimeout": 60000
+            }
+
+            response = requests.post(
+                f"{self.flaresolverr_url}/v1",
+                json=flaresolverr_data,
+                timeout=90
+            )
+
+            if response.status_code != 200:
+                logger.error(f"FlareSolverr request failed: {response.status_code}")
+                return False
+
+            login_response = response.json().get('solution', {})
+
+            if login_response and "login" not in login_response.get('url', '').lower():
+                self.driver.get("https://www.crunchyroll.com")
+                time.sleep(2)
+
+                for cookie in login_response.get('cookies', []):
+                    try:
+                        self.driver.add_cookie({
+                            'name': cookie.get('name'),
+                            'value': cookie.get('value'),
+                            'domain': cookie.get('domain', '.crunchyroll.com'),
+                            'path': cookie.get('path', '/'),
+                        })
+                    except Exception as e:
+                        logger.debug(f"Failed to add FlareSolverr cookie: {e}")
+
+                logger.info("✅ FlareSolverr login successful, capturing authentication tokens...")
+                self._capture_tokens_post_login()
+                self._cache_authentication()
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"FlareSolverr authentication failed: {e}")
+            return False
+
+    def _cache_authentication(self) -> None:
+        """Save authentication data including tokens and cookies"""
+        try:
+            if not self.driver:
+                logger.warning("No driver available for caching")
+                return
+
+            cookies = self.driver.get_cookies()
+            auth_data = {
+                'access_token': getattr(self, 'access_token', None),
+                'account_id': getattr(self, 'cached_account_id', None),
+                'device_id': getattr(self, 'cached_device_id', None)
+            }
+
+            logger.info(f"💾 Caching authentication:")
+            logger.info(f"   - Cookies: {len(cookies)}")
+            logger.info(f"   - Access token: {'✅' if auth_data['access_token'] else '❌'}")
+            logger.info(f"   - Account ID: {'✅' if auth_data['account_id'] else '❌'}")
+            logger.info(f"   - Device ID: {'✅' if auth_data['device_id'] else '❌'}")
+
+            success = self.auth_cache.save_crunchyroll_auth(cookies=cookies, **auth_data)
+
+            if success:
+                logger.info("✅ Authentication cached successfully")
+                cached_check = self.auth_cache.load_crunchyroll_auth()
+                if cached_check:
+                    logger.info(f"✅ Cache verification successful")
+                else:
+                    logger.error("❌ Cache verification failed")
+            else:
+                logger.error("❌ Failed to cache authentication")
+
+        except Exception as e:
+            logger.error(f"Error caching authentication: {e}")
+
+    def _capture_tokens_post_login(self):
+        """Capture authentication tokens after successful login"""
+        try:
+            logger.info("🔍 Capturing authentication tokens via token endpoint...")
+            device_id = self._get_or_create_device_id()
+
+            token_response = self.driver.execute_script("""
+                const deviceId = arguments[0];
+
+                return fetch("https://www.crunchyroll.com/auth/v1/token", {
+                    method: "POST",
                     headers: {
-                        'Accept': 'application/json',
-                        'Authorization': `Bearer ${accessToken}`,
-                        'sec-fetch-dest': 'empty',
-                        'sec-fetch-mode': 'cors',
-                        'sec-fetch-site': 'same-origin'
+                        "accept": "*/*",
+                        "accept-language": "en-US,en;q=0.9",
+                        "authorization": "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "sec-fetch-dest": "empty",
+                        "sec-fetch-mode": "cors",
+                        "sec-fetch-site": "same-origin"
                     },
-                    credentials: 'include',
-                    mode: 'cors'
+                    referrer: "https://www.crunchyroll.com/history",
+                    body: `device_id=${deviceId}&device_type=Chrome&grant_type=etp_rt_cookie`,
+                    mode: "cors",
+                    credentials: "include"
                 })
-                .then(response => ({
-                    success: response.ok,
-                    status: response.status
-                }))
+                .then(response => {
+                    if (!response.ok) {
+                        return {
+                            success: false,
+                            status: response.status,
+                            statusText: response.statusText
+                        };
+                    }
+                    return response.json().then(data => ({
+                        success: true,
+                        status: response.status,
+                        data: data
+                    }));
+                })
                 .catch(error => ({
                     success: false,
                     error: error.message
                 }));
-            """, self.access_token, self.cached_account_id)
+            """, device_id)
 
-            if test_response and test_response.get('success'):
-                logger.debug("✅ Cached token is valid")
-                return True
+            if not token_response or not token_response.get('success'):
+                status = token_response.get('status', 'unknown') if token_response else 'no response'
+                error_msg = token_response.get('error', 'unknown error') if token_response else 'no response'
+                logger.error(f"Browser token request failed: {status} - {error_msg}")
+                return None
+
+            data = token_response.get('data', {})
+            account_id = data.get('account_id')
+            self.access_token = data.get('access_token')
+            self.cached_account_id = account_id
+            self.cached_device_id = device_id
+
+            if account_id:
+                logger.info(f"✅ Got new account ID via browser: {account_id[:8]}...")
             else:
-                logger.info(f"❌ Cached token invalid (status: {test_response.get('status', 'unknown')}), refreshing...")
-                return self._refresh_access_token()
+                logger.error("❌ No account_id in token response")
+
+            return account_id
 
         except Exception as e:
-            logger.debug(f"Error verifying cached token: {e}")
-            return self._refresh_access_token()
+            logger.error(f"Error capturing tokens: {e}")
+            return None
+
+    def _get_or_create_device_id(self) -> str:
+        """Get existing device_id from cache/browser or create a consistent one"""
+        try:
+            if hasattr(self, 'cached_device_id') and self.cached_device_id:
+                return self.cached_device_id
+
+            device_id = self._get_device_id()
+            if device_id:
+                return device_id
+
+            email_hash = hashlib.sha256(self.email.encode()).hexdigest()[:16]
+            device_id = f"web-{email_hash}-{uuid.uuid4()}"
+            logger.info(f"Created new device_id: {device_id[:20]}...")
+            return device_id
+
+        except Exception as e:
+            logger.error(f"Error getting device_id: {e}")
+            return f"web-{uuid.uuid4()}"
+
+    def _get_device_id(self) -> Optional[str]:
+        """Retrieve device_id from browser localStorage"""
+        try:
+            device_id = self.driver.execute_script("""
+                const storage = window.localStorage;
+                const keys = Object.keys(storage);
+                for (let key of keys) {
+                    if (key.includes('device_id') || key.includes('deviceId')) {
+                        return storage.getItem(key);
+                    }
+                }
+                return null;
+            """)
+            return device_id
+        except Exception as e:
+            logger.debug(f"Could not get device_id from browser: {e}")
+            return None
+
+    def _has_cached_auth(self) -> bool:
+        """Fast check if cached authentication exists"""
+        try:
+            cached_auth = self.auth_cache.load_crunchyroll_auth()
+            if not cached_auth:
+                return False
+
+            has_cookies = bool(cached_auth.get('cookies'))
+            has_tokens = bool(cached_auth.get('access_token') and cached_auth.get('account_id'))
+
+            return has_cookies or has_tokens
+
+        except Exception as e:
+            logger.debug(f"Error checking cached auth: {e}")
+            return False
 
     def _setup_driver(self) -> None:
         """Initialize Chrome driver with appropriate options"""
@@ -87,7 +317,6 @@ class CrunchyrollAuth:
             else:
                 logger.info("Running with visible browser")
 
-            # Essential Chrome options
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-blink-features=AutomationControlled')
@@ -106,7 +335,7 @@ class CrunchyrollAuth:
             raise
 
     def _try_cached_auth(self) -> bool:
-        """Load and apply cached authentication cookies and tokens with validation"""
+        """Load and apply cached authentication cookies and tokens"""
         cached_auth = self.auth_cache.load_crunchyroll_auth()
         if not cached_auth:
             return False
@@ -129,7 +358,6 @@ class CrunchyrollAuth:
                         'path': cookie.get('path', '/'),
                     }
 
-                    # Add optional fields if present
                     for field in ['secure', 'httpOnly']:
                         if cookie.get(field) is not None:
                             cookie_data[field] = cookie.get(field)
@@ -140,16 +368,12 @@ class CrunchyrollAuth:
                     logger.debug(f"Failed to add cookie {cookie.get('name')}: {e}")
                     continue
 
-            # Load cached access_token and account_id
             self.access_token = cached_auth.get('access_token')
             self.cached_account_id = cached_auth.get('account_id')
             self.cached_device_id = cached_auth.get('device_id')
 
-            # Log what we loaded for debugging
             if self.access_token and self.cached_account_id:
-                logger.info(f"✅ Cached access token and account ID loaded: {self.cached_account_id[:8]}...")
-            else:
-                logger.debug("No cached access token/account ID found")
+                logger.info(f"✅ Cached access token and account ID loaded")
 
             logger.info("✅ Cached cookies loaded successfully")
             return True
@@ -159,20 +383,17 @@ class CrunchyrollAuth:
             return False
 
     def _verify_authentication(self) -> bool:
-        """Verify that authentication is working by checking account page AND validating token"""
+        """Verify authentication by checking account page and validating token"""
         try:
             logger.info("🔍 Verifying authentication...")
 
-            # Step 1: Check account page access (existing verification)
             self.driver.get("https://www.crunchyroll.com/account")
             time.sleep(3)
 
-            # Check if redirected to login
             if "login" in self.driver.current_url.lower():
                 logger.info("❌ Redirected to login page - not authenticated")
                 return False
 
-            # Look for logged-in indicators
             page_source = self.driver.page_source.lower()
             logged_in_indicators = [
                 "account", "profile", "subscription", "settings",
@@ -186,228 +407,70 @@ class CrunchyrollAuth:
                 logger.info("❌ No logged-in indicators found")
                 return False
 
-            logger.info(f"✅ Account access verified - found indicators: {indicators_found}")
+            logger.info(f"✅ Account access verified")
 
-            # Step 2: Validate API token if we have one
             if self.access_token and self.cached_account_id:
-                logger.info("🔍 Validating API access token...")
-                if not self._verify_cached_token():
-                    logger.warning("⚠️ Account access works but API token is invalid")
-                    return False
-                logger.info("✅ API access token validated")
-            else:
-                logger.info("ℹ️ No API token to validate (will be requested when needed)")
+                if self._verify_cached_token():
+                    logger.info("✅ Full authentication verification successful")
+                    return True
 
+            logger.info("✅ Basic authentication verification successful")
             return True
 
         except Exception as e:
             logger.error(f"Error verifying authentication: {e}")
             return False
 
-    def _refresh_access_token(self) -> bool:
-        """Refresh expired access token using current browser session"""
+    def _verify_cached_token(self) -> bool:
+        """Verify cached access token is still valid"""
         try:
-            logger.info("🔄 Refreshing access token...")
+            test_response = self.driver.execute_script("""
+                const accountId = arguments[0];
+                const accessToken = arguments[1];
 
-            # Generate or get device ID
-            device_id = self._get_or_create_device_id()
-
-            # Make token request via browser JavaScript (maintains session context)
-            token_response = self.driver.execute_script("""
-                const deviceId = arguments[0];
-
-                return fetch("https://www.crunchyroll.com/auth/v1/token", {
-                    method: "POST",
+                return fetch(`https://www.crunchyroll.com/content/v2/${accountId}/watch-history?locale=en-US&page_size=1`, {
                     headers: {
-                        "accept": "*/*",
-                        "accept-language": "en-US,en;q=0.9",
-                        "authorization": "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6",
-                        "content-type": "application/x-www-form-urlencoded",
-                        "sec-fetch-dest": "empty",
-                        "sec-fetch-mode": "cors",
-                        "sec-fetch-site": "same-origin"
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Accept': 'application/json'
                     },
-                    body: `device_id=${deviceId}&device_type=Chrome&grant_type=etp_rt_cookie`,
-                    mode: "cors",
-                    credentials: "include"
+                    credentials: 'include'
                 })
-                .then(response => {
-                    if (!response.ok) {
-                        return { success: false, status: response.status };
-                    }
-                    return response.json().then(data => ({ success: true, data: data }));
-                })
-                .catch(error => ({ success: false, error: error.message }));
-            """, device_id)
+                .then(response => ({
+                    success: response.ok,
+                    status: response.status
+                }))
+                .catch(error => ({
+                    success: false,
+                    error: error.message
+                }));
+            """, self.cached_account_id, self.access_token)
 
-            if token_response and token_response.get('success'):
-                data = token_response.get('data', {})
-                self.access_token = data.get('access_token')
-                self.cached_account_id = data.get('account_id')
-                self.cached_device_id = device_id
-
-                logger.info("✅ Access token refreshed successfully")
-
-                # Update the cache with new token
-                self._cache_authentication()
-
+            if test_response and test_response.get('success'):
                 return True
             else:
-                logger.error(f"❌ Token refresh failed: {token_response}")
-                return False
+                logger.info(f"❌ Cached token invalid, refreshing...")
+                return self._refresh_access_token()
+
+        except Exception as e:
+            logger.debug(f"Error verifying cached token: {e}")
+            return self._refresh_access_token()
+
+    def _refresh_access_token(self) -> bool:
+        """Refresh the access token using the current session"""
+        try:
+            logger.info("🔄 Refreshing access token...")
+            account_id = self._capture_tokens_post_login()
+
+            if account_id:
+                self._cache_authentication()
+                logger.info("✅ Access token refreshed successfully")
+                return True
+
+            logger.error("❌ Failed to refresh access token")
+            return False
 
         except Exception as e:
             logger.error(f"Error refreshing access token: {e}")
-            return False
-
-    def _perform_fresh_authentication(self) -> bool:
-        """Perform fresh authentication using available methods"""
-        # Try FlareSolverr first if available
-        if self.flaresolverr_url:
-            if self._authenticate_with_flaresolverr():
-                if self._verify_authentication():
-                    return True
-            logger.warning("FlareSolverr authentication failed, falling back to Selenium")
-
-        # Fallback to direct Selenium
-        if self._authenticate_with_selenium():
-            if self._verify_authentication():
-                return True
-
-        return False
-
-    def _authenticate_with_selenium(self) -> bool:
-        """Authenticate using direct Selenium interaction - FIXED to cache tokens"""
-        try:
-            logger.info("🌐 Authenticating with Selenium...")
-
-            self.driver.get("https://www.crunchyroll.com/login")
-            self._handle_cloudflare_challenge()
-
-            wait = WebDriverWait(self.driver, 30)
-
-            # Find and fill email field
-            email_field = self._find_form_field(wait, [
-                "#email", "input[name='email']", "input[type='email']"
-            ])
-            if not email_field:
-                logger.error("❌ Could not find email field")
-                self._save_debug_html("login_no_email.html")
-                return False
-
-            # Find and fill password field
-            password_field = self._find_form_field(wait, [
-                "#password", "input[name='password']", "input[type='password']"
-            ], wait_for_presence=False)
-            if not password_field:
-                logger.error("❌ Could not find password field")
-                self._save_debug_html("login_no_password.html")
-                return False
-
-            # Find submit button
-            submit_button = self._find_form_field(wait, [
-                "button[type='submit']", "input[type='submit']",
-                "button:contains('Sign In')", "button:contains('Log In')", ".login-button"
-            ], wait_for_presence=False)
-            if not submit_button:
-                logger.error("❌ Could not find submit button")
-                self._save_debug_html("login_no_submit.html")
-                return False
-
-            # Fill and submit form
-            logger.info("📝 Filling login form...")
-            email_field.clear()
-            email_field.send_keys(self.email)
-            time.sleep(1)
-
-            password_field.clear()
-            password_field.send_keys(self.password)
-            time.sleep(1)
-
-            logger.info("🔘 Clicking submit button...")
-            submit_button.click()
-            time.sleep(5)
-
-            # Check if still on login page
-            if "login" in self.driver.current_url.lower():
-                logger.error("❌ Still on login page after submission")
-                self._save_debug_html("login_failed.html")
-                return False
-
-            # Capture tokens after successful login
-            logger.info("✅ Login successful, capturing authentication tokens...")
-            self._capture_tokens_post_login()
-
-            # CRITICAL FIX: Cache the authentication data including tokens
-            logger.info("💾 Caching authentication data...")
-            self._cache_authentication()
-
-            logger.info("✅ Selenium authentication successful")
-            return True
-
-        except Exception as e:
-            logger.error(f"Selenium authentication failed: {e}")
-            self._save_debug_html("selenium_auth_error.html")
-            return False
-
-    def _authenticate_with_flaresolverr(self) -> bool:
-        """Authenticate using FlareSolverr service - FIXED to cache tokens"""
-        try:
-            logger.info("🔥 Authenticating with FlareSolverr...")
-
-            client = FlareSolverrClient(self.flaresolverr_url)
-
-            if not client.create_session():
-                return False
-
-            # Get login page
-            response = client.solve_challenge("https://www.crunchyroll.com/login")
-            if not response:
-                return False
-
-            # Extract form data and add credentials
-            form_data = self._extract_login_form_data(response.get('response', ''))
-            form_data['email'] = self.email
-            form_data['password'] = self.password
-
-            # Submit login
-            login_response = client.solve_challenge(
-                url="https://www.crunchyroll.com/login",
-                cookies=response.get('cookies', []),
-                post_data=form_data
-            )
-
-            if login_response and "login" not in login_response.get('url', '').lower():
-                # Apply cookies to browser session
-                self.driver.get("https://www.crunchyroll.com")
-                time.sleep(2)
-
-                for cookie in login_response.get('cookies', []):
-                    try:
-                        self.driver.add_cookie({
-                            'name': cookie.get('name'),
-                            'value': cookie.get('value'),
-                            'domain': cookie.get('domain', '.crunchyroll.com'),
-                            'path': cookie.get('path', '/'),
-                        })
-                    except Exception as e:
-                        logger.debug(f"Failed to add FlareSolverr cookie: {e}")
-
-                # Capture tokens after successful FlareSolverr auth
-                logger.info("✅ FlareSolverr login successful, capturing authentication tokens...")
-                self._capture_tokens_post_login()
-
-                # CRITICAL FIX: Cache the authentication data including tokens
-                logger.info("💾 Caching authentication data...")
-                self._cache_authentication()
-
-                logger.info("✅ FlareSolverr authentication successful")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"FlareSolverr authentication failed: {e}")
             return False
 
     def _find_form_field(self, wait, selectors: List[str], wait_for_presence: bool = True):
@@ -433,7 +496,6 @@ class CrunchyrollAuth:
             try:
                 page_source = self.driver.page_source.lower()
 
-                # Check for Cloudflare indicators
                 cf_indicators = [
                     'checking your browser', 'cloudflare', 'please wait',
                     'ddos protection', 'security check', 'just a moment'
@@ -444,7 +506,6 @@ class CrunchyrollAuth:
                     time.sleep(5)
                     continue
 
-                # Check for login form
                 if any(indicator in page_source for indicator in ['email', 'password', 'sign in', 'login']):
                     logger.info("✅ Cloudflare challenge completed")
                     return True
@@ -457,157 +518,3 @@ class CrunchyrollAuth:
 
         logger.warning("⚠️ Cloudflare challenge timeout")
         return False
-
-    def _extract_login_form_data(self, html_content: str) -> Dict[str, str]:
-        """Extract hidden form fields from login page"""
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            form = soup.find('form')
-            form_data = {}
-
-            if form:
-                for hidden_input in form.find_all('input', {'type': 'hidden'}):
-                    name = hidden_input.get('name')
-                    value = hidden_input.get('value', '')
-                    if name:
-                        form_data[name] = value
-
-            return form_data
-
-        except Exception as e:
-            logger.error(f"Error extracting form data: {e}")
-            return {}
-
-    def _cache_authentication(self) -> None:
-        """Enhanced caching - save tokens along with cookies"""
-        try:
-            if not self.driver:
-                logger.warning("No driver available for caching")
-                return
-
-            cookies = self.driver.get_cookies()
-
-            # Prepare auth data with tokens
-            auth_data = {
-                'access_token': getattr(self, 'access_token', None),
-                'account_id': getattr(self, 'cached_account_id', None),
-                'device_id': getattr(self, 'cached_device_id', None)
-            }
-
-            # Log what we're caching for debugging
-            logger.info(f"💾 Caching authentication:")
-            logger.info(f"   - Cookies: {len(cookies)}")
-            logger.info(f"   - Access token: {'✅' if auth_data['access_token'] else '❌'}")
-            logger.info(f"   - Account ID: {'✅' if auth_data['account_id'] else '❌'}")
-            logger.info(f"   - Device ID: {'✅' if auth_data['device_id'] else '❌'}")
-
-            # Debug: Show first 8 chars of IDs for verification
-            if auth_data['access_token']:
-                logger.debug(f"   - Access token (first 20 chars): {auth_data['access_token'][:20]}...")
-            if auth_data['account_id']:
-                logger.debug(f"   - Account ID: {auth_data['account_id']}")
-            if auth_data['device_id']:
-                logger.debug(f"   - Device ID: {auth_data['device_id']}")
-
-            # Save to cache
-            success = self.auth_cache.save_crunchyroll_auth(cookies=cookies, **auth_data)
-
-            if success:
-                logger.info("✅ Authentication cached successfully")
-            else:
-                logger.error("❌ Failed to cache authentication")
-
-            # Verify cache was saved
-            cached_check = self.auth_cache.load_crunchyroll_auth()
-            if cached_check:
-                logger.info(f"✅ Cache verification: found {len(cached_check.get('cookies', []))} cookies, "
-                            f"token={'✅' if cached_check.get('access_token') else '❌'}, "
-                            f"account_id={'✅' if cached_check.get('account_id') else '❌'}")
-            else:
-                logger.error("❌ Cache verification failed - no cached data found")
-
-        except Exception as e:
-            logger.error(f"Error caching authentication: {e}")
-            import traceback
-            logger.debug(f"Cache error traceback: {traceback.format_exc()}")
-
-    def _capture_tokens_post_login(self):
-        """Simplified token capture - only use the method that works"""
-        try:
-            logger.info("🔍 Capturing authentication tokens via token endpoint...")
-
-            # Generate or get device ID
-            device_id = self._get_or_create_device_id()
-
-            # Make token request via browser JavaScript (maintains session context)
-            token_response = self.driver.execute_script("""
-                const deviceId = arguments[0];
-
-                return fetch("https://www.crunchyroll.com/auth/v1/token", {
-                    method: "POST",
-                    headers: {
-                        "accept": "*/*",
-                        "accept-language": "en-US,en;q=0.9",
-                        "authorization": "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6",
-                        "content-type": "application/x-www-form-urlencoded",
-                        "sec-fetch-dest": "empty",
-                        "sec-fetch-mode": "cors",
-                        "sec-fetch-site": "same-origin"
-                    },
-                    body: `device_id=${deviceId}&device_type=Chrome&grant_type=etp_rt_cookie`,
-                    mode: "cors",
-                    credentials: "include"
-                })
-                .then(response => {
-                    if (!response.ok) {
-                        return { success: false, status: response.status };
-                    }
-                    return response.json().then(data => ({ success: true, data: data }));
-                })
-                .catch(error => ({ success: false, error: error.message }));
-            """, device_id)
-
-            if token_response and token_response.get('success'):
-                data = token_response.get('data', {})
-                self.access_token = data.get('access_token')
-                self.cached_account_id = data.get('account_id')
-                self.cached_device_id = device_id
-
-                logger.info(f"✅ Successfully captured tokens:")
-                logger.info(f"   - Access token: {'✅' if self.access_token else '❌'}")
-                logger.info(f"   - Account ID: {'✅' if self.cached_account_id else '❌'}")
-                logger.info(f"   - Device ID: {'✅' if self.cached_device_id else '❌'}")
-
-                return True
-            else:
-                logger.error(f"❌ Token request failed: {token_response}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error capturing tokens: {e}")
-            return False
-
-    def _should_refresh_token(self) -> bool:
-        """Check if cached token should be refreshed based on age"""
-        try:
-            cached_auth = self.auth_cache.load_crunchyroll_auth()
-            if not cached_auth or not cached_auth.get('access_token'):
-                return True
-
-            # Check token timestamp
-            timestamp_str = cached_auth.get('timestamp')
-            if not timestamp_str:
-                return True
-
-            token_age = datetime.now() - datetime.fromisoformat(timestamp_str)
-
-            # Refresh if token is older than 23 hours (tokens typically last 24h)
-            if token_age > timedelta(hours=23):
-                logger.info(f"Token is {token_age.total_seconds() / 3600:.1f} hours old, proactively refreshing")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.debug(f"Error checking token age: {e}")
-            return False
