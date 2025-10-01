@@ -1,5 +1,8 @@
 """
 Cache Management for Authentication and Application Data
+
+This module provides unified caching for both authentication credentials
+and application data like anime mappings.
 """
 
 import json
@@ -35,8 +38,19 @@ class CacheManager:
         except Exception as e:
             logger.error(f"Error clearing cache: {e}")
 
+    # ==================== Crunchyroll Authentication ====================
+
     def save_crunchyroll_auth(self, cookies: List[Dict], **kwargs) -> bool:
-        """Save Crunchyroll authentication data with 30-day expiration"""
+        """
+        Save Crunchyroll authentication data with 30-day expiration
+
+        Args:
+            cookies: List of browser cookies
+            **kwargs: Additional auth data (access_token, account_id, device_id, etc.)
+
+        Returns:
+            True if save successful, False otherwise
+        """
         try:
             auth_data = self._load_auth_cache()
 
@@ -54,7 +68,12 @@ class CacheManager:
             return False
 
     def load_crunchyroll_auth(self) -> Optional[Dict[str, Any]]:
-        """Load Crunchyroll authentication data if not expired"""
+        """
+        Load Crunchyroll authentication data if not expired
+
+        Returns:
+            Dictionary with auth data, or None if expired/not found
+        """
         try:
             auth_data = self._load_auth_cache()
             cr_auth = auth_data.get('crunchyroll')
@@ -62,10 +81,16 @@ class CacheManager:
             if not cr_auth:
                 return None
 
-            expires_at = datetime.fromisoformat(cr_auth.get('expires_at', '2000-01-01'))
-            if datetime.now() > expires_at:
-                logger.info("Crunchyroll auth cache expired")
-                self.clear_crunchyroll_auth()
+            # Check expiration
+            expires_at_str = cr_auth.get('expires_at', '2000-01-01')
+            try:
+                expires_at = datetime.fromisoformat(expires_at_str)
+                if datetime.now() > expires_at:
+                    logger.info("Crunchyroll auth cache expired")
+                    self.clear_crunchyroll_auth()
+                    return None
+            except ValueError:
+                logger.warning(f"Invalid expires_at format: {expires_at_str}")
                 return None
 
             return cr_auth
@@ -85,8 +110,30 @@ class CacheManager:
             logger.error(f"Error clearing Crunchyroll auth: {e}")
             return False
 
+    def is_crunchyroll_auth_valid(self) -> bool:
+        """
+        Check if cached Crunchyroll authentication is still valid
+
+        Returns:
+            True if valid cached auth exists, False otherwise
+        """
+        auth_data = self.load_crunchyroll_auth()
+        return auth_data is not None
+
+    # ==================== AniList Authentication ====================
+
     def save_anilist_auth(self, access_token: str, user_id: int, user_name: str) -> bool:
-        """Save AniList authentication data with 1-year expiration"""
+        """
+        Save AniList authentication data with 1-year expiration
+
+        Args:
+            access_token: OAuth access token
+            user_id: AniList user ID
+            user_name: AniList username
+
+        Returns:
+            True if save successful, False otherwise
+        """
         try:
             auth_data = self._load_auth_cache()
 
@@ -105,7 +152,12 @@ class CacheManager:
             return False
 
     def load_anilist_auth(self) -> Optional[Dict[str, Any]]:
-        """Load AniList authentication data if not expired"""
+        """
+        Load AniList authentication data if not expired
+
+        Returns:
+            Dictionary with auth data, or None if expired/not found
+        """
         try:
             auth_data = self._load_auth_cache()
             al_auth = auth_data.get('anilist')
@@ -113,10 +165,16 @@ class CacheManager:
             if not al_auth:
                 return None
 
-            expires_at = datetime.fromisoformat(al_auth.get('expires_at', '2000-01-01'))
-            if datetime.now() > expires_at:
-                logger.info("AniList auth cache expired")
-                self.clear_anilist_auth()
+            # Check expiration
+            expires_at_str = al_auth.get('expires_at', '2000-01-01')
+            try:
+                expires_at = datetime.fromisoformat(expires_at_str)
+                if datetime.now() > expires_at:
+                    logger.info("AniList auth cache expired")
+                    self.clear_anilist_auth()
+                    return None
+            except ValueError:
+                logger.warning(f"Invalid expires_at format: {expires_at_str}")
                 return None
 
             return al_auth
@@ -136,8 +194,26 @@ class CacheManager:
             logger.error(f"Error clearing AniList auth: {e}")
             return False
 
+    def is_anilist_auth_valid(self) -> bool:
+        """
+        Check if cached AniList authentication is still valid
+
+        Returns:
+            True if valid cached auth exists, False otherwise
+        """
+        auth_data = self.load_anilist_auth()
+        return auth_data is not None
+
+    # ==================== Application Data (Anime Mappings) ====================
+
     def save_anime_mapping(self, crunchyroll_title: str, anilist_data: Dict) -> None:
-        """Cache anime title mapping for faster lookups"""
+        """
+        Cache anime title mapping for faster lookups
+
+        Args:
+            crunchyroll_title: Crunchyroll series title
+            anilist_data: Corresponding AniList entry data
+        """
         try:
             data_cache = self._load_data_cache()
 
@@ -155,22 +231,36 @@ class CacheManager:
             logger.error(f"Error saving anime mapping: {e}")
 
     def get_anime_mapping(self, crunchyroll_title: str) -> Optional[Dict]:
-        """Retrieve cached anime mapping if recent (within 30 days)"""
+        """
+        Retrieve cached anime mapping if recent (within 30 days)
+
+        Args:
+            crunchyroll_title: Crunchyroll series title to look up
+
+        Returns:
+            AniList data if found and recent, None otherwise
+        """
         try:
             data_cache = self._load_data_cache()
             mappings = data_cache.get('anime_mappings', {})
 
             mapping = mappings.get(crunchyroll_title)
             if mapping:
-                timestamp = datetime.fromisoformat(mapping.get('timestamp', '2000-01-01'))
-                if datetime.now() - timestamp < timedelta(days=30):
-                    return mapping.get('anilist_data')
+                timestamp_str = mapping.get('timestamp', '2000-01-01')
+                try:
+                    timestamp = datetime.fromisoformat(timestamp_str)
+                    if datetime.now() - timestamp < timedelta(days=30):
+                        return mapping.get('anilist_data')
+                except ValueError:
+                    logger.warning(f"Invalid timestamp format: {timestamp_str}")
 
             return None
 
         except Exception as e:
             logger.error(f"Error getting anime mapping: {e}")
             return None
+
+    # ==================== Internal Cache File Operations ====================
 
     def _load_auth_cache(self) -> Dict[str, Any]:
         """Load authentication cache from disk"""
@@ -220,29 +310,51 @@ class CacheManager:
 
 
 class AuthCache:
-    """Backward compatibility wrapper for legacy code using AuthCache interface"""
+    """
+    Backward compatibility wrapper for legacy code using AuthCache interface
+
+    This class provides the same interface as the old AuthCache but delegates
+    all operations to CacheManager internally.
+
+    Note: New code should use CacheManager directly.
+    """
 
     def __init__(self, cache_dir: str = "_cache"):
         self._cache_manager = CacheManager(cache_dir)
 
     def save_crunchyroll_auth(self, cookies: List[Dict], **kwargs) -> bool:
+        """Save Crunchyroll authentication (legacy interface)"""
         return self._cache_manager.save_crunchyroll_auth(cookies, **kwargs)
 
     def load_crunchyroll_auth(self) -> Optional[Dict[str, Any]]:
+        """Load Crunchyroll authentication (legacy interface)"""
         return self._cache_manager.load_crunchyroll_auth()
 
     def clear_crunchyroll_auth(self) -> bool:
+        """Clear Crunchyroll authentication (legacy interface)"""
         return self._cache_manager.clear_crunchyroll_auth()
 
+    def is_crunchyroll_auth_valid(self) -> bool:
+        """Check if Crunchyroll auth is valid (legacy interface)"""
+        return self._cache_manager.is_crunchyroll_auth_valid()
+
     def save_anilist_auth(self, access_token: str, user_id: int, user_name: str) -> bool:
+        """Save AniList authentication (legacy interface)"""
         return self._cache_manager.save_anilist_auth(access_token, user_id, user_name)
 
     def load_anilist_auth(self) -> Optional[Dict[str, Any]]:
+        """Load AniList authentication (legacy interface)"""
         return self._cache_manager.load_anilist_auth()
 
     def clear_anilist_auth(self) -> bool:
+        """Clear AniList authentication (legacy interface)"""
         return self._cache_manager.clear_anilist_auth()
 
+    def is_anilist_auth_valid(self) -> bool:
+        """Check if AniList auth is valid (legacy interface)"""
+        return self._cache_manager.is_anilist_auth_valid()
+
     def clear_all_auth(self) -> bool:
+        """Clear all authentication (legacy interface)"""
         self._cache_manager.clear_all_cache()
         return True

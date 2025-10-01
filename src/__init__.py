@@ -19,5 +19,4 @@ __all__ = [
     'RateLimitTracker',
     'AnimeMatcher',
     'CacheManager',
-    'AuthCache'
 ]
