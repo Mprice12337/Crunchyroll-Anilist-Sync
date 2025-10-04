@@ -18,7 +18,7 @@ class AnimeMatcher:
         self.movie_formats = ['MOVIE', 'SPECIAL', 'OVA', 'ONA']
 
     def find_best_match_with_season(self, target_title: str, candidates: List[Dict[str, Any]],
-                                   target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int]]:
+                                    target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int]]:
         """
         Find best anime match with season awareness
 
@@ -58,13 +58,14 @@ class AnimeMatcher:
 
         if best_match:
             anime_title = self._get_primary_title(best_match)
-            logger.info(f"✅ Matched '{target_title}' to '{anime_title}' S{best_season} (similarity: {best_similarity:.2f})")
+            logger.info(
+                f"✅ Matched '{target_title}' to '{anime_title}' S{best_season} (similarity: {best_similarity:.2f})")
             return best_match, best_similarity, best_season
 
         return None
 
     def find_best_match(self, target_title: str, candidates: List[Dict[str, Any]],
-                       target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float]]:
+                        target_season: int = 1) -> Optional[Tuple[Dict[str, Any], float]]:
         """Legacy compatibility method without season return"""
         result = self.find_best_match_with_season(target_title, candidates, target_season)
         if result:
@@ -73,8 +74,9 @@ class AnimeMatcher:
         return None
 
     def find_best_match_with_episode_validation(self, target_title: str, target_episode: int,
-                                               candidates: List[Dict[str, Any]],
-                                               estimated_season: int = 1) -> Optional[Tuple[Dict[str, Any], float, int, int]]:
+                                                candidates: List[Dict[str, Any]],
+                                                estimated_season: int = 1) -> Optional[
+        Tuple[Dict[str, Any], float, int, int]]:
         """Legacy compatibility with episode validation"""
         result = self.find_best_match_with_season(target_title, candidates, estimated_season)
         if result:
@@ -82,7 +84,8 @@ class AnimeMatcher:
             return match, similarity, season, target_episode
         return None
 
-    def _find_best_movie_match(self, target_title: str, candidates: List[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], float, int]]:
+    def _find_best_movie_match(self, target_title: str, candidates: List[Dict[str, Any]]) -> Optional[
+        Tuple[Dict[str, Any], float, int]]:
         """Find best match for movies and specials"""
         clean_target = re.sub(r'\s*-?\s*movie\s*', '', target_title, flags=re.IGNORECASE)
         clean_target = re.sub(r'\s*-?\s*0\s*$', '', clean_target)
@@ -95,12 +98,25 @@ class AnimeMatcher:
             if format_type not in self.movie_formats:
                 continue
 
+            # Skip obvious commercials/promotional content
+            title_obj = candidate.get('title', {})
+            all_titles = ' '.join([
+                title_obj.get('romaji', ''),
+                title_obj.get('english', ''),
+                title_obj.get('native', '')
+            ]).lower()
+
+            commercial_indicators = ['cm', 'commercial', 'pv', 'promotional', 'advertisement', 'ad']
+            if any(indicator in all_titles for indicator in commercial_indicators):
+                continue
+
             similarity = self._calculate_title_similarity(clean_target, candidate)
 
+            # Strongly prefer MOVIE format over SPECIAL/OVA/ONA
             if format_type == 'MOVIE':
-                similarity += 0.05
+                similarity += 0.15
 
-            if similarity > best_similarity and similarity >= 0.85:
+            if similarity > best_similarity and similarity >= 0.75:
                 best_similarity = similarity
                 best_match = candidate
 
@@ -255,8 +271,8 @@ class AnimeMatcher:
         title_obj = anime.get('title', {})
         if isinstance(title_obj, dict):
             return (title_obj.get('romaji') or
-                   title_obj.get('english') or
-                   title_obj.get('native') or 'Unknown')
+                    title_obj.get('english') or
+                    title_obj.get('native') or 'Unknown')
         elif isinstance(title_obj, str):
             return title_obj
         return 'Unknown'

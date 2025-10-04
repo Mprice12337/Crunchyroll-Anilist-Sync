@@ -137,7 +137,7 @@ class SyncManager:
                 page_stats = self._process_page_episodes(episodes)
                 total_processed += len(episodes)
 
-                if page_stats['successful_updates'] == 0 and page_stats['skipped_episodes'] == len(episodes):
+                if page_stats['successful_updates'] == 0 and page_stats['skipped_episodes'] > 0:
                     consecutive_no_update_pages += 1
                     logger.info(f"Page {page_num}: All episodes already synced ({consecutive_no_update_pages}/3 pages)")
 
@@ -551,7 +551,9 @@ class SyncManager:
                             logger.info(f"✅ Found matching series: {season_data['title']} - using as season {season_num}")
                             return best_entry, season_num, cr_episode
 
-            if best_entry and best_season_num == 1:
+            # Always try cumulative episode conversion when cr_season > 1
+            # This handles absolute episode numbers (e.g., episode 45 -> Season 2 Episode 21)
+            if best_entry:
                 cumulative_episodes = 0
                 sorted_seasons = sorted(season_structure.keys())
 
@@ -796,7 +798,7 @@ class SyncManager:
             time.sleep(1.0)
 
     def _needs_update(self, anime_id: int, target_progress: int) -> bool:
-        """Check if an anime entry needs to be updated."""
+        """Check if an anime entry needs to be updated, accounting for rewatches."""
         try:
             existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
 
@@ -804,7 +806,17 @@ class SyncManager:
                 return True
 
             current_progress = existing_entry.get('progress', 0)
+            current_status = existing_entry.get('status')
 
+            # Rewatch scenario detection: COMPLETED series with new progress less than or equal to current
+            # This handles cases where someone rewatches a series they've already finished
+            if current_status == 'COMPLETED':
+                if target_progress <= current_progress:
+                    logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
+                                 f"now watching episode {target_progress} - needs update")
+                    return True
+
+            # Normal progress check: skip if already at or past this episode
             if current_progress >= target_progress:
                 logger.debug(f"Anime {anime_id} already at episode {current_progress} "
                              f"(target: {target_progress}) - skipping")
