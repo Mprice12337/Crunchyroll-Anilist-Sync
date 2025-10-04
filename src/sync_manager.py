@@ -113,7 +113,7 @@ class SyncManager:
             return False
 
     def _update_anilist_progress_with_validation(self) -> bool:
-        """Update AniList progress using smart pagination."""
+        """Update AniList progress using smart pagination with aggressive early stopping."""
         logger.info("🎯 Updating AniList with smart pagination...")
 
         self.watch_history = []
@@ -137,12 +137,23 @@ class SyncManager:
                 page_stats = self._process_page_episodes(episodes)
                 total_processed += len(episodes)
 
+                # AGGRESSIVE EARLY STOP: If page 1 is mostly already synced, stop immediately
+                if page_num == 1:
+                    skip_ratio = page_stats['skipped_episodes'] / max(len(episodes), 1)
+                    if skip_ratio > 0.8 and page_stats['successful_updates'] < 5:
+                        logger.info(
+                            f"✅ Stopping early - Page 1 had {page_stats['skipped_episodes']}/{len(episodes)} skips "
+                            f"({skip_ratio * 100:.0f}%) and only {page_stats['successful_updates']} updates")
+                        logger.info("   Your recent history is already synced!")
+                        break
+
+                # Standard consecutive page check (now only needs 2 pages)
                 if page_stats['successful_updates'] == 0 and page_stats['skipped_episodes'] > 0:
                     consecutive_no_update_pages += 1
-                    logger.info(f"Page {page_num}: All episodes already synced ({consecutive_no_update_pages}/3 pages)")
+                    logger.info(f"Page {page_num}: All episodes already synced ({consecutive_no_update_pages}/2 pages)")
 
-                    if consecutive_no_update_pages >= 3:
-                        logger.info("✅ Stopping early - 3 consecutive pages with no updates needed")
+                    if consecutive_no_update_pages >= 2:
+                        logger.info("✅ Stopping early - 2 consecutive pages with no updates needed")
                         break
                 else:
                     consecutive_no_update_pages = 0
@@ -808,13 +819,24 @@ class SyncManager:
             current_progress = existing_entry.get('progress', 0)
             current_status = existing_entry.get('status')
 
-            # Rewatch scenario detection: COMPLETED series with new progress less than or equal to current
-            # This handles cases where someone rewatches a series they've already finished
-            if current_status == 'COMPLETED':
-                if target_progress <= current_progress:
-                    logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
-                                 f"now watching episode {target_progress} - needs update")
-                    return True
+            # CRITICAL FIX: If already at the exact same progress and status, skip
+            # This prevents infinite rewatch detection loops
+            if current_progress == target_progress:
+                if current_status == 'COMPLETED':
+                    # Already completed at this episode, no need to update
+                    logger.debug(f"Anime {anime_id} already completed at episode {target_progress} - skipping")
+                    return False
+                elif current_status == 'CURRENT':
+                    # Already watching at this exact episode, no need to update
+                    logger.debug(f"Anime {anime_id} already at episode {target_progress} (CURRENT) - skipping")
+                    return False
+
+            # Rewatch scenario: COMPLETED series with target progress < current
+            # Only triggers for actual rewatches (going back to earlier episodes)
+            if current_status == 'COMPLETED' and target_progress < current_progress:
+                logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
+                             f"now watching episode {target_progress} - needs update")
+                return True
 
             # Normal progress check: skip if already at or past this episode
             if current_progress >= target_progress:
