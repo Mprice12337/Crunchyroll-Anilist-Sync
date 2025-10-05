@@ -121,7 +121,7 @@ class SyncManager:
         max_pages = self.config.get('max_pages', 10)
         page_num = 0
         total_processed = 0
-        consecutive_no_update_pages = 0
+        consecutive_high_skip_pages = 0
 
         while page_num < max_pages:
             try:
@@ -137,26 +137,38 @@ class SyncManager:
                 page_stats = self._process_page_episodes(episodes)
                 total_processed += len(episodes)
 
-                # AGGRESSIVE EARLY STOP: If page 1 is mostly already synced, stop immediately
+                # Calculate ACTUAL skip ratio based on processed unique series-season combinations
+                total_processed_items = (page_stats['successful_updates'] +
+                                         page_stats['failed_updates'] +
+                                         page_stats['skipped_episodes'])
+
+                skip_ratio = page_stats['skipped_episodes'] / max(total_processed_items,
+                                                                  1) if total_processed_items > 0 else 0
+
+                logger.info(f"Page {page_num} stats: {page_stats['successful_updates']} updates, "
+                            f"{page_stats['skipped_episodes']} skipped, "
+                            f"{page_stats['failed_updates']} failed "
+                            f"({skip_ratio * 100:.0f}% skip ratio)")
+
+                # AGGRESSIVE EARLY STOP: If page 1 has high skip ratio and few updates
                 if page_num == 1:
-                    skip_ratio = page_stats['skipped_episodes'] / max(len(episodes), 1)
-                    if skip_ratio > 0.8 and page_stats['successful_updates'] < 5:
+                    if skip_ratio >= 0.7 and page_stats['successful_updates'] <= 3:
                         logger.info(
-                            f"✅ Stopping early - Page 1 had {page_stats['skipped_episodes']}/{len(episodes)} skips "
-                            f"({skip_ratio * 100:.0f}%) and only {page_stats['successful_updates']} updates")
+                            f"✅ Stopping early - Page 1 had {page_stats['skipped_episodes']}/{total_processed_items} items skipped "
+                            f"({skip_ratio * 100:.0f}%) with only {page_stats['successful_updates']} updates")
                         logger.info("   Your recent history is already synced!")
                         break
 
-                # Standard consecutive page check (now only needs 2 pages)
-                if page_stats['successful_updates'] == 0 and page_stats['skipped_episodes'] > 0:
-                    consecutive_no_update_pages += 1
-                    logger.info(f"Page {page_num}: All episodes already synced ({consecutive_no_update_pages}/2 pages)")
+                # Consecutive high-skip page detection
+                if skip_ratio >= 0.7:
+                    consecutive_high_skip_pages += 1
+                    logger.info(f"   High skip ratio detected ({consecutive_high_skip_pages}/2 consecutive pages)")
 
-                    if consecutive_no_update_pages >= 2:
-                        logger.info("✅ Stopping early - 2 consecutive pages with no updates needed")
+                    if consecutive_high_skip_pages >= 2:
+                        logger.info("✅ Stopping early - 2 consecutive pages with >70% items already synced")
                         break
                 else:
-                    consecutive_no_update_pages = 0
+                    consecutive_high_skip_pages = 0
 
                 time.sleep(0.5)
 
