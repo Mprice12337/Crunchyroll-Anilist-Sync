@@ -131,68 +131,88 @@ class AniListClient:
             return result
 
     def _is_rewatch_scenario(self, existing_entry: Dict[str, Any], progress: int,
-                            total_episodes: Optional[int]) -> bool:
+                             total_episodes: Optional[int]) -> bool:
         """
         Determine if this is a rewatch scenario
 
         A rewatch is detected when:
-        - Series was previously COMPLETED
-        - New progress is less than what was previously watched
-        - Or new progress is at episode 1 of a completed series
+        - repeat > 0 (already in a rewatch, regardless of status)
+
+        Note: Initial rewatch detection (COMPLETED → CURRENT transition) is handled
+        in _handle_normal_update where we can see the status change happening.
         """
-        current_status = existing_entry.get('status')
-        current_progress = existing_entry.get('progress', 0)
+        current_repeat = existing_entry.get('repeat', 0)
 
-        if current_status != 'COMPLETED':
-            return False
-
-        if progress < current_progress or progress == 1:
-            logger.info(f"🔄 Rewatch detected: {existing_entry.get('media', {}).get('title', {}).get('romaji', 'Unknown')}")
+        # If repeat > 0, we're in rewatch territory (ongoing or completed rewatch)
+        if current_repeat > 0:
+            logger.debug(f"In rewatch scenario (repeat count: {current_repeat})")
             return True
 
         return False
 
     def _handle_rewatch_update(self, anime_id: int, progress: int, existing_entry: Dict[str, Any],
-                             total_episodes: Optional[int]) -> bool:
-        """Handle progress updates for rewatch scenarios"""
+                               total_episodes: Optional[int]) -> bool:
+        """
+        Handle progress updates for ongoing rewatches (repeat > 0)
+
+        This is called when repeat > 0, meaning we're already in a rewatch.
+        Just update progress and status normally, maintaining the repeat counter.
+        """
         current_repeat = existing_entry.get('repeat', 0)
 
         if total_episodes and progress >= total_episodes:
-            new_repeat = current_repeat + 1
+            # Completing the rewatch
             status = 'COMPLETED'
-            logger.info(f"🏁 Completing rewatch #{new_repeat}")
-            return self.update_anime_progress(anime_id, progress, status, new_repeat)
+            logger.info(f"🏁 Completed rewatch #{current_repeat}")
+            return self.update_anime_progress(anime_id, progress, status, current_repeat)
         else:
+            # Still watching the rewatch
             status = 'CURRENT'
-            logger.info(f"📺 Continuing rewatch (episode {progress})")
+            logger.info(f"📺 Continuing rewatch #{current_repeat} (episode {progress})")
             return self.update_anime_progress(anime_id, progress, status, current_repeat)
 
     def _handle_normal_update(self, anime_id: int, progress: int, existing_entry: Dict[str, Any],
-                            total_episodes: Optional[int]) -> bool:
-        """Handle normal progress updates (not rewatches)"""
+                              total_episodes: Optional[int]) -> bool:
+        """
+        Handle normal progress updates (not currently in a rewatch)
+
+        KEY LOGIC: If status is COMPLETED and we're changing to CURRENT,
+        this is the start of a rewatch - increment repeat counter.
+        """
         current_status = existing_entry.get('status')
         current_progress = existing_entry.get('progress', 0)
         current_repeat = existing_entry.get('repeat', 0)
 
+        # Determine new status
         if total_episodes and progress >= total_episodes:
+            # Completing the series
+            new_status = 'COMPLETED'
+            new_repeat = current_repeat
+
             if current_status != 'COMPLETED' or current_progress < total_episodes:
-                status = 'COMPLETED'
                 logger.info(f"🏁 Completing series (episode {progress}/{total_episodes})")
             else:
-                status = current_status
                 logger.info(f"✅ Series already completed, maintaining status (episode {progress}/{total_episodes})")
-        else:
-            if current_status in ['PLANNING', 'PAUSED']:
-                status = 'CURRENT'
-                logger.info(f"▶️ Starting to watch (episode {progress})")
-            elif current_status == 'COMPLETED':
-                status = 'CURRENT'
-                logger.info(f"📺 Resuming completed series (episode {progress})")
-            else:
-                status = 'CURRENT'
-                logger.info(f"📺 Updating progress (episode {progress})")
 
-        return self.update_anime_progress(anime_id, progress, status, current_repeat)
+        else:
+            # Not at the end yet - will be CURRENT
+            new_status = 'CURRENT'
+
+            # CRITICAL: Detect rewatch by status transition
+            if current_status == 'COMPLETED':
+                # Series was completed, now watching again = REWATCH!
+                new_repeat = current_repeat + 1
+                logger.info(f"🔄 Starting rewatch #{new_repeat} (series was COMPLETED, now watching episode {progress})")
+            else:
+                # Normal progression (PLANNING → CURRENT, or CURRENT → CURRENT)
+                new_repeat = current_repeat
+
+                if current_status in ['PLANNING', 'PAUSED']:
+                    logger.info(f"▶️ Starting to watch (episode {progress})")
+                else:
+                    logger.info(f"📺 Updating progress (episode {progress})")
+
+        return self.update_anime_progress(anime_id, progress, new_status, new_repeat)
 
     def _handle_new_watch(self, anime_id: int, progress: int, total_episodes: Optional[int]) -> bool:
         """Handle updates for new anime (no existing entry)"""
