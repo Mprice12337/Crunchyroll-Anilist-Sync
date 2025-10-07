@@ -9,7 +9,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANGUAGE=en_US.UTF-8 \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
-    TZ=America/New_York
+    TZ=America/New_York \
+    # CRITICAL: Prevent undetected-chromedriver from downloading drivers
+    UC_NO_DOWNLOAD=1
 
 # Install system dependencies in optimal order
 RUN apt-get update && apt-get install -y \
@@ -69,7 +71,7 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     # Cleanup
     && rm -rf /var/lib/apt/lists/* \
-    # Verify Chrome installation
+    # Verify Chrome installation and log version
     && google-chrome --version
 
 # Set timezone
@@ -81,9 +83,10 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt ./
 
-# Install Python dependencies
-# IMPORTANT: Pin undetected-chromedriver to a stable version
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies with explicit versions
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "import selenium; print(f'Selenium version: {selenium.__version__}')" \
+    && python -c "import undetected_chromedriver as uc; print(f'UC version: {uc.__version__}')"
 
 # Copy application files
 COPY main.py ./
@@ -103,12 +106,12 @@ ENV HEADLESS=true
 RUN mkdir -p /app/_cache /app/logs \
     && chmod 755 /app/_cache /app/logs
 
-# Create a fake X11 display for better anti-detection (optional but helpful)
-# This makes headless mode appear more like a real display
-ENV DISPLAY=:99
-
-# CRITICAL: Set Chrome to use /dev/shm for better performance and stability
+# CRITICAL: Set up /dev/shm for Chrome
 RUN mkdir -p /dev/shm && chmod 1777 /dev/shm
+
+# Create a directory for ChromeDriver cache (undetected-chromedriver will use this)
+RUN mkdir -p /root/.local/share/undetected_chromedriver \
+    && chmod -R 755 /root/.local
 
 # Add a healthcheck to ensure container is working
 HEALTHCHECK --interval=1h --timeout=30s --start-period=10s --retries=3 \

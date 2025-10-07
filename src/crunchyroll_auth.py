@@ -8,6 +8,7 @@ import logging
 import uuid
 import hashlib
 import requests
+import os
 from typing import Dict, Optional, List
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -89,7 +90,7 @@ class CrunchyrollAuth:
             else:
                 password_field.submit()
 
-            time.sleep(5)
+            time.sleep(12)
 
             if "login" in self.driver.current_url.lower():
                 logger.error("Still on login page after submission")
@@ -105,49 +106,157 @@ class CrunchyrollAuth:
     def _authenticate_via_flaresolverr(self) -> bool:
         """Authenticate using FlareSolverr proxy"""
         try:
-            flaresolverr_data = {
-                "cmd": "request.post",
+            logger.info("🔐 Attempting authentication via FlareSolverr...")
+
+            # FlareSolverr Strategy: Use it to bypass Cloudflare and get session cookies,
+            # then transfer those to Selenium driver for the actual login
+
+            # Step 1: Use FlareSolverr to bypass Cloudflare on login page
+            logger.info("Step 1: Using FlareSolverr to bypass Cloudflare...")
+            flare_data = {
+                "cmd": "request.get",
                 "url": "https://www.crunchyroll.com/login",
-                "postData": f"email={self.email}&password={self.password}",
                 "maxTimeout": 60000
             }
 
-            response = requests.post(
+            flare_response = requests.post(
                 f"{self.flaresolverr_url}/v1",
-                json=flaresolverr_data,
+                json=flare_data,
                 timeout=90
             )
 
-            if response.status_code != 200:
-                logger.error(f"FlareSolverr request failed: {response.status_code}")
+            if flare_response.status_code != 200:
+                logger.error(f"FlareSolverr request failed: {flare_response.status_code}")
+                logger.debug(f"Response: {flare_response.text[:500]}")
                 return False
 
-            login_response = response.json().get('solution', {})
+            flare_solution = flare_response.json().get('solution', {})
+            if not flare_solution:
+                logger.error("No solution in FlareSolverr response")
+                return False
 
-            if login_response and "login" not in login_response.get('url', '').lower():
-                self.driver.get("https://www.crunchyroll.com")
-                time.sleep(2)
+            cloudflare_cookies = flare_solution.get('cookies', [])
+            logger.info(f"✅ FlareSolverr bypassed Cloudflare, got {len(cloudflare_cookies)} cookies")
 
-                for cookie in login_response.get('cookies', []):
-                    try:
-                        self.driver.add_cookie({
-                            'name': cookie.get('name'),
-                            'value': cookie.get('value'),
-                            'domain': cookie.get('domain', '.crunchyroll.com'),
-                            'path': cookie.get('path', '/'),
-                        })
-                    except Exception as e:
-                        logger.debug(f"Failed to add FlareSolverr cookie: {e}")
+            # Step 2: Transfer Cloudflare bypass cookies to Selenium
+            logger.info("Step 2: Transferring Cloudflare cookies to Selenium driver...")
+            self.driver.get("https://www.crunchyroll.com")
+            time.sleep(2)
 
-                logger.info("✅ FlareSolverr login successful, capturing authentication tokens...")
-                self._capture_tokens_post_login()
-                self._cache_authentication()
-                return True
+            # Add Cloudflare cookies to driver
+            for cookie in cloudflare_cookies:
+                try:
+                    cookie_data = {
+                        'name': cookie.get('name'),
+                        'value': cookie.get('value'),
+                        'domain': cookie.get('domain', '.crunchyroll.com'),
+                        'path': cookie.get('path', '/'),
+                    }
 
-            return False
+                    if cookie.get('secure') is not None:
+                        cookie_data['secure'] = cookie.get('secure')
+                    if cookie.get('httpOnly') is not None:
+                        cookie_data['httpOnly'] = cookie.get('httpOnly')
+
+                    self.driver.add_cookie(cookie_data)
+                    logger.debug(f"Added cookie: {cookie.get('name')}")
+
+                except Exception as e:
+                    logger.debug(f"Failed to add cookie {cookie.get('name')}: {e}")
+
+            logger.info("✅ Cloudflare cookies transferred to driver")
+
+            # Step 3: Now use Selenium with Cloudflare bypassed to perform login
+            logger.info("Step 3: Performing login via Selenium with Cloudflare bypassed...")
+            self.driver.get("https://www.crunchyroll.com/login")
+            time.sleep(3)
+
+            # Check if we're past Cloudflare
+            page_source = self.driver.page_source.lower()
+            if any(indicator in page_source for indicator in ['checking your browser', 'cloudflare', 'just a moment']):
+                logger.warning("Still seeing Cloudflare challenge, waiting...")
+                time.sleep(5)
+
+            # Now fill in the login form
+            wait = WebDriverWait(self.driver, 20)
+
+            email_field = self._find_form_field(wait, [
+                'input[type="email"]',
+                'input[name="email"]',
+                '#email'
+            ])
+
+            password_field = self._find_form_field(wait, [
+                'input[type="password"]',
+                'input[name="password"]',
+                '#password'
+            ])
+
+            if not email_field or not password_field:
+                logger.error("Could not locate login form fields")
+                return False
+
+            logger.info("Found login form fields")
+            email_field.clear()
+            email_field.send_keys(self.email)
+            time.sleep(1)
+
+            password_field.clear()
+            password_field.send_keys(self.password)
+            time.sleep(1)
+
+            submit_button = self._find_form_field(wait, [
+                'button[type="submit"]',
+                'button.submit-button',
+                'input[type="submit"]'
+            ], wait_for_presence=False)
+
+            if submit_button:
+                logger.info("Clicking submit button")
+                submit_button.click()
+            else:
+                logger.info("Submitting form via password field")
+                password_field.submit()
+
+            # Wait for redirect after login
+            logger.info("Waiting for login to complete...")
+            time.sleep(12)
+
+            # Check if login was successful
+            current_url = self.driver.current_url.lower()
+            logger.info(f"Current URL after login: {current_url}")
+
+            if "login" in current_url:
+                logger.error("❌ Still on login page after submission")
+                # Log page source for debugging
+                page_source = self.driver.page_source
+                if "incorrect" in page_source.lower() or "invalid" in page_source.lower():
+                    logger.error("Possible incorrect credentials")
+                return False
+
+            logger.info("✅ Login successful via FlareSolverr + Selenium")
+
+            # Step 4: Capture tokens (same as browser method)
+            logger.info("Step 4: Capturing authentication tokens...")
+            account_id = self._capture_tokens_post_login()
+
+            if not account_id:
+                logger.error("❌ Failed to capture tokens after login")
+                return False
+
+            logger.info(f"✅ Captured account_id: {account_id[:8]}...")
+
+            # Step 5: Cache authentication
+            logger.info("Step 5: Caching authentication...")
+            self._cache_authentication()
+
+            logger.info("✅ FlareSolverr authentication completed successfully")
+            return True
 
         except Exception as e:
             logger.error(f"FlareSolverr authentication failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def _cache_authentication(self) -> None:
@@ -307,9 +416,17 @@ class CrunchyrollAuth:
             return False
 
     def _setup_driver(self) -> None:
-        """Initialize Chrome driver with appropriate options"""
+        """Initialize Chrome driver with appropriate options - DOCKER COMPATIBLE"""
         try:
             options = uc.ChromeOptions()
+
+            # CRITICAL: Set binary location explicitly for Docker
+            chrome_binary = os.environ.get('CHROME_BIN', '/usr/bin/google-chrome')
+            if os.path.exists(chrome_binary):
+                options.binary_location = chrome_binary
+                logger.info(f"Using Chrome binary: {chrome_binary}")
+            else:
+                logger.warning(f"Chrome binary not found at {chrome_binary}, letting uc auto-detect")
 
             if self.headless:
                 options.add_argument('--headless=new')
@@ -317,21 +434,21 @@ class CrunchyrollAuth:
             else:
                 logger.info("Running with visible browser")
 
-            # Basic Chrome options
+            # CRITICAL Docker flags - order matters!
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-blink-features=AutomationControlled')
-            options.add_argument('--window-size=1920,1080')
-            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-
-            # Docker-specific optimizations
             options.add_argument('--disable-gpu')
             options.add_argument('--disable-software-rasterizer')
-            options.add_argument('--disable-extensions')
-            options.add_argument('--disable-features=VizDisplayCompositor')
-            options.add_argument('--remote-debugging-port=9222')
 
-            # Stability improvements
+            # Window and user agent
+            options.add_argument('--window-size=1920,1080')
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+            # Anti-detection
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--disable-extensions')
+
+            # Stability improvements for Docker
             options.add_argument('--disable-background-networking')
             options.add_argument('--disable-background-timer-throttling')
             options.add_argument('--disable-backgrounding-occluded-windows')
@@ -346,15 +463,52 @@ class CrunchyrollAuth:
             options.add_argument('--metrics-recording-only')
             options.add_argument('--mute-audio')
 
-            self.driver = uc.Chrome(options=options)
+            # Memory and performance
+            options.add_argument('--disable-features=VizDisplayCompositor')
+            options.add_argument('--remote-debugging-port=9222')
+
+            # CRITICAL: Prevent automatic driver downloads in Docker
+            # Use version_main to match installed Chrome version
+            try:
+                chrome_version_output = os.popen(f'{chrome_binary} --version').read()
+                chrome_version = chrome_version_output.split()[-1].split('.')[0]
+                logger.info(f"Detected Chrome major version: {chrome_version}")
+
+                # Initialize driver with explicit version
+                self.driver = uc.Chrome(
+                    options=options,
+                    version_main=int(chrome_version),
+                    driver_executable_path=None,  # Let uc handle driver
+                    use_subprocess=True
+                )
+            except Exception as version_error:
+                logger.warning(f"Could not detect Chrome version: {version_error}")
+                logger.info("Attempting to initialize driver without version specification...")
+                # Fallback: let uc auto-detect everything
+                self.driver = uc.Chrome(options=options, use_subprocess=True)
+
+            # Anti-detection script
             self.driver.execute_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
 
-            logger.info("✅ Chrome driver setup completed")
+            logger.info("✅ Chrome driver setup completed successfully")
+            logger.info(f"   Chrome version: {self.driver.capabilities.get('browserVersion', 'unknown')}")
+            logger.info(f"   Driver version: {self.driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')}")
 
         except Exception as e:
             logger.error(f"Failed to setup Chrome driver: {e}")
+            logger.error("Detailed error information:")
+            logger.error(f"  Chrome binary location: {os.environ.get('CHROME_BIN', 'not set')}")
+            logger.error(f"  Chrome binary exists: {os.path.exists(chrome_binary) if 'chrome_binary' in locals() else 'unknown'}")
+
+            # Try to get more detailed error info
+            try:
+                import traceback
+                logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            except:
+                pass
+
             raise
 
     def _try_cached_auth(self) -> bool:
