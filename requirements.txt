@@ -1,9 +1,13 @@
-# Core dependencies
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-selenium>=4.15.0
-undetected-chromedriver>=3.5.0
-python-dotenv>=1.0.0
+# Core dependencies - with version pins for stability
+requests>=2.31.0,<3.0.0
+beautifulsoup4>=4.12.0,<5.0.0
+
+# Selenium and Chrome driver - CRITICAL: Compatible versions
+selenium>=4.15.0,<4.26.0
+undetected-chromedriver>=3.5.5,<3.6.0
+
+# Environment configuration
+python-dotenv>=1.0.0,<2.0.0
 
 # Development dependencies (optional)
 pytest>=7.4.0
