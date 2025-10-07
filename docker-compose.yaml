@@ -1,24 +1,39 @@
 version: '3.8'
-  services:
-    flaresolverr:
-      image: ghcr.io/flaresolverr/flaresolverr:latest
-      container_name: flaresolverr
-      environment:
-        - LOG_LEVEL=info
-      ports:
-        - "8191:8191"
-      restart: unless-stopped
 
-    sync:
-      build: .
-      container_name: crunchyroll-anilist-sync
-      depends_on:
-        - flaresolverr
-      environment:
-        - FLARESOLVERR_URL=http://flaresolverr:8191
-        - HEADLESS=true
-      env_file:
-        - .env
-      volumes:
-        - ./_cache:/app/_cache
-        - ./logs:/app/logs
+services:
+  sync:
+    build: .
+    container_name: crunchyroll-anilist-sync
+    environment:
+      # Chrome/Browser settings
+      - HEADLESS=true
+
+      # Cron schedule configuration (default: daily at 2 AM)
+      # Format: minute hour day month weekday
+      # Examples:
+      #   "0 2 * * *"    - Daily at 2 AM
+      #   "0 */6 * * *"  - Every 6 hours
+      #   "0 0 * * 0"    - Weekly on Sunday at midnight
+      #   "0 3 * * 1-5"  - Weekdays at 3 AM
+      - CRON_SCHEDULE=0 2 * * *
+
+      # Optional: FlareSolverr configuration (for Cloudflare bypass)
+      # If you have a FlareSolverr instance running elsewhere, specify its URL here
+      # Example: http://192.168.1.100:8191 or http://flaresolverr.local:8191
+      # Leave commented out if not using FlareSolverr
+      # - FLARESOLVERR_URL=http://your-flaresolverr-host:8191
+
+      # Optional: Enable debug logging
+      - DEBUG=false
+    env_file:
+      - .env
+    volumes:
+      # Persist cache and logs between container restarts
+      - ./data/_cache:/app/_cache
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

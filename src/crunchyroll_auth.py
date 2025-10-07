@@ -317,11 +317,34 @@ class CrunchyrollAuth:
             else:
                 logger.info("Running with visible browser")
 
+            # Basic Chrome options
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-blink-features=AutomationControlled')
             options.add_argument('--window-size=1920,1080')
             options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+
+            # Docker-specific optimizations
+            options.add_argument('--disable-gpu')
+            options.add_argument('--disable-software-rasterizer')
+            options.add_argument('--disable-extensions')
+            options.add_argument('--disable-features=VizDisplayCompositor')
+            options.add_argument('--remote-debugging-port=9222')
+
+            # Stability improvements
+            options.add_argument('--disable-background-networking')
+            options.add_argument('--disable-background-timer-throttling')
+            options.add_argument('--disable-backgrounding-occluded-windows')
+            options.add_argument('--disable-breakpad')
+            options.add_argument('--disable-component-extensions-with-background-pages')
+            options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
+            options.add_argument('--disable-ipc-flooding-protection')
+            options.add_argument('--disable-renderer-backgrounding')
+            options.add_argument('--enable-features=NetworkService,NetworkServiceInProcess')
+            options.add_argument('--force-color-profile=srgb')
+            options.add_argument('--hide-scrollbars')
+            options.add_argument('--metrics-recording-only')
+            options.add_argument('--mute-audio')
 
             self.driver = uc.Chrome(options=options)
             self.driver.execute_script(

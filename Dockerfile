@@ -1,36 +1,59 @@
-# Dockerfile
+# Production Dockerfile with full Chrome support
 FROM python:3.9-slim
 
-# Install system dependencies for Chrome and Selenium
+# Set environment variables early
+ENV DEBIAN_FRONTEND=noninteractive \
+    DISPLAY=:99 \
+    CHROME_BIN=/usr/bin/google-chrome \
+    CHROME_PATH=/usr/bin/google-chrome
+
+# Install system dependencies in correct order
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    ca-certificates \
+    apt-transport-https \
+    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y \
+    google-chrome-stable \
     unzip \
     curl \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list' \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
+    cron \
+    fonts-liberation \
+    libnss3 \
+    libxss1 \
+    libappindicator3-1 \
+    libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml ./
+# Copy requirements first for better caching
+COPY requirements.txt ./
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
 COPY main.py ./
 COPY src/ ./src/
+COPY entrypoint.sh ./
 
-# Install uv
-RUN pip install uv
+# Make entrypoint executable
+RUN chmod +x /app/entrypoint.sh
 
-# Install project dependencies
-RUN uv sync --frozen
+# Default cron schedule: daily at 2 AM
+ENV CRON_SCHEDULE="0 2 * * *"
 
-# Set environment variables for Chrome
-ENV DISPLAY=:99
-ENV CHROME_BIN=/usr/bin/google-chrome
-ENV CHROME_PATH=/usr/bin/google-chrome
+# Default to headless mode
+ENV HEADLESS=true
 
-# Run the application
-CMD ["uv", "run", "python", "main.py"]
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/_cache /app/logs && \
+    chmod 755 /app/_cache /app/logs
+
+# Use the entrypoint script
+ENTRYPOINT ["/app/entrypoint.sh"]
