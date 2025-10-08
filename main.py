@@ -81,8 +81,7 @@ def validate_environment() -> bool:
     required_vars = [
         'CRUNCHYROLL_EMAIL',
         'CRUNCHYROLL_PASSWORD',
-        'ANILIST_CLIENT_ID',
-        'ANILIST_CLIENT_SECRET'
+        'ANILIST_AUTH_CODE'
     ]
 
     missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -91,7 +90,16 @@ def validate_environment() -> bool:
         logging.error("Missing required environment variables:")
         for var in missing_vars:
             logging.error(f"  - {var}")
-        logging.error("Please check your .env file.")
+
+        if 'ANILIST_AUTH_CODE' in missing_vars:
+            logging.error("\n" + "=" * 60)
+            logging.error("To get your AniList auth code:")
+            logging.error("1. Visit: https://anilist.co/api/v2/oauth/authorize?client_id=21538&response_type=code")
+            logging.error("2. Authorize the application")
+            logging.error("3. Copy the code from the PIN page")
+            logging.error("4. Set ANILIST_AUTH_CODE in your .env file")
+            logging.error("=" * 60)
+
         return False
 
     return True
@@ -116,8 +124,6 @@ def main() -> int:
         config = {
             'crunchyroll_email': os.getenv('CRUNCHYROLL_EMAIL'),
             'crunchyroll_password': os.getenv('CRUNCHYROLL_PASSWORD'),
-            'anilist_client_id': os.getenv('ANILIST_CLIENT_ID'),
-            'anilist_client_secret': os.getenv('ANILIST_CLIENT_SECRET'),
             'flaresolverr_url': os.getenv('FLARESOLVERR_URL'),
             'headless': not args.no_headless,
             'max_pages': args.max_pages,
@@ -126,7 +132,8 @@ def main() -> int:
             'debug': args.debug  # Pass debug flag to components
         }
 
-        logger.info(f"Configuration: max_pages={config['max_pages']}, headless={config['headless']}, dry_run={config['dry_run']}")
+        logger.info(
+            f"Configuration: max_pages={config['max_pages']}, headless={config['headless']}, dry_run={config['dry_run']}")
 
         # Initialize and run sync manager
         sync_manager = SyncManager(**config)

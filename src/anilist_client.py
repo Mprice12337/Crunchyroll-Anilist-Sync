@@ -14,10 +14,9 @@ logger = logging.getLogger(__name__)
 class AniListClient:
     """High-level AniList client with intelligent rewatch detection"""
 
-    def __init__(self, client_id: str, client_secret: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.auth = AniListAuth(client_id, client_secret)
+    def __init__(self):
+        """Initialize AniList client with static credentials"""
+        self.auth = AniListAuth()
         self.api = AniListAPI()
 
     def authenticate(self) -> bool:

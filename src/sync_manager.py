@@ -29,10 +29,8 @@ class SyncManager:
             flaresolverr_url=config.get('flaresolverr_url')
         )
 
-        self.anilist_client = AniListClient(
-            client_id=config['anilist_client_id'],
-            client_secret=config['anilist_client_secret']
-        )
+        # AniList client now uses static credentials internally
+        self.anilist_client = AniListClient()
 
         self.anime_matcher = AnimeMatcher(similarity_threshold=0.75)
 

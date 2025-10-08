@@ -43,18 +43,37 @@ A simplified Python application that automatically syncs your Crunchyroll watch 
    ```env
    CRUNCHYROLL_EMAIL=your_email@example.com
    CRUNCHYROLL_PASSWORD=your_password
-   ANILIST_CLIENT_ID=your_client_id
-   ANILIST_CLIENT_SECRET=your_client_secret
+   ANILIST_AUTH_CODE=your_auth_code_here
    FLARESOLVERR_URL=http://localhost:8191  # Optional
    ```
 
-### AniList OAuth Setup
+### AniList Authentication Setup
 
-1. Go to https://anilist.co/settings/developer
-2. Create a new client application:
-   - **Name**: Crunchyroll Sync (or any name you prefer)
-   - **Redirect URI**: `https://anilist.co/api/v2/oauth/pin`
-3. Copy the Client ID and Client Secret to your `.env` file
+The sync tool uses a static OAuth client. Follow these steps to get your authentication code:
+
+1. **Visit the authorization URL**:
+   ```
+   https://anilist.co/api/v2/oauth/authorize?client_id=21538&response_type=code
+   ```
+
+2. **Authorize the application**:
+   - You'll be redirected to AniList's authorization page
+   - Click "Approve" to authorize the sync tool
+   - You'll see a PIN code on the next page
+
+3. **Copy the auth code**:
+   - Copy the entire code from the PIN page
+   - Add it to your `.env` file as `ANILIST_AUTH_CODE`
+
+4. **The auth code is reusable**:
+   - Once authenticated, your access token is cached
+   - You only need to get a new auth code if the cache is cleared
+   - Auth codes don't expire, but cached tokens may expire after 1 year
+
+**Example:**
+```env
+ANILIST_AUTH_CODE=def502003a1b2c3d4e5f6789...
+```
 
 ### Usage
 
@@ -74,7 +93,7 @@ python main.py --dry-run
 # Limit history pages to scrape
 python main.py --max-pages 5
 
-# Clear cache before running
+# Clear cache before running (requires new AniList auth)
 python main.py --clear-cache
 ```
 
@@ -86,8 +105,7 @@ python main.py --clear-cache
 |----------|----------|-------------|
 | `CRUNCHYROLL_EMAIL` | Yes | Your Crunchyroll email address |
 | `CRUNCHYROLL_PASSWORD` | Yes | Your Crunchyroll password |
-| `ANILIST_CLIENT_ID` | Yes | AniList OAuth client ID |
-| `ANILIST_CLIENT_SECRET` | Yes | AniList OAuth client secret |
+| `ANILIST_AUTH_CODE` | Yes | Your AniList OAuth authorization code (see setup above) |
 | `FLARESOLVERR_URL` | No | FlareSolverr URL for Cloudflare bypass |
 
 ### Command Line Options
@@ -98,6 +116,45 @@ python main.py --clear-cache
 - `--dry-run`: Show what would be updated without making changes
 - `--max-pages N`: Maximum number of history pages to scrape (default: 10)
 - `--clear-cache`: Clear all cached data before running
+
+## Docker Usage
+
+### Using Docker Compose
+
+1. **Copy and configure environment file**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your credentials and auth code
+   ```
+
+2. **Get your AniList auth code** (if not already done):
+   - Visit: https://anilist.co/api/v2/oauth/authorize?client_id=21538&response_type=code
+   - Authorize and copy the code
+   - Add to `.env` as `ANILIST_AUTH_CODE`
+
+3. **Build and run**:
+   ```bash
+   docker-compose up -d
+   ```
+
+4. **View logs**:
+   ```bash
+   docker logs -f crunchyroll-anilist-sync
+   ```
+
+The container will:
+- Run an initial sync on startup
+- Schedule automatic syncs based on `CRON_SCHEDULE` (default: daily at 2 AM)
+- Store cache and logs in the `./data` directory
+
+### Environment Variables (Docker)
+
+Additional Docker-specific variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRON_SCHEDULE` | `0 2 * * *` | Cron schedule for automatic syncs |
+| `HEADLESS` | `true` | Run browser in headless mode |
 
 ## Optional: FlareSolverr Setup
 
@@ -118,86 +175,30 @@ Then add to your `.env`:
 FLARESOLVERR_URL=http://localhost:8191
 ```
 
-## How It Works
-
-1. **Authentication**: Authenticates with both Crunchyroll and AniList using cached credentials when possible
-2. **History Scraping**: Scrapes your Crunchyroll watch history using Selenium with Cloudflare protection handling
-3. **Title Matching**: Uses fuzzy string matching to find corresponding anime on AniList
-4. **Progress Update**: Updates your AniList progress based on the highest episode watched for each series
-5. **Caching**: Caches authentication and anime mappings to speed up subsequent runs
-
-## Architecture
-
-The application consists of several clean, focused modules:
-
-- **`main.py`**: Entry point and argument parsing
-- **`sync_manager.py`**: Orchestrates the entire sync process
-- **`crunchyroll_scraper.py`**: Handles Crunchyroll authentication and history scraping
-- **`anilist_client.py`**: Manages AniList API interactions
-- **`anime_matcher.py`**: Matches anime titles between platforms
-- **`cache_manager.py`**: Handles authentication and data caching
-
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Login Failed**: 
+1. **AniList Authentication Failed**: 
+   - Your auth code may be invalid or expired
+   - Visit the authorization URL again to get a new code
+   - Make sure you copied the entire code from the PIN page
+   - If cache is cleared, you'll need to provide the auth code again
+
+2. **Login Failed**: 
    - Verify your Crunchyroll credentials
    - Try running with `--no-headless` to see what's happening
    - Clear cache with `--clear-cache`
 
-2. **Cloudflare Challenges**:
+3. **Cloudflare Challenges**:
    - Set up FlareSolverr (recommended)
    - Try running with `--no-headless`
    - Wait a few minutes and try again
 
-3. **No Anime Found**:
+4. **No Anime Found**:
    - The anime might not be on AniList
    - Title matching might fail for obscure shows
    - Check the debug logs for matching details
-
-4. **Rate Limiting**:
-   - The app includes automatic rate limiting
-   - If issues persist, reduce `--max-pages`
-
-### Debug Mode
-
-Run with `--debug` to see detailed logs:
-```bash
-python main.py --debug --no-headless
-```
-
-This will show:
-- Authentication steps
-- HTML parsing details
-- Anime matching scores
-- API request/response information
-
-## Development
-
-### Project Structure
-```
-crunchyroll-anilist-sync/
-├── main.py                 # Entry point
-├── src/                    # Main source code
-│   ├── sync_manager.py     # Sync orchestration
-│   ├── crunchyroll_scraper.py  # Crunchyroll integration
-│   ├── anilist_client.py   # AniList API client
-│   ├── anime_matcher.py    # Title matching logic
-│   ├── cache_manager.py    # Caching utilities
-│   └── flaresolverr_client.py  # FlareSolverr integration
-├── logs/                   # Application logs
-├── _cache/                 # Cached data
-└── requirements.txt        # Python dependencies
-```
-
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
 
 ## License
 

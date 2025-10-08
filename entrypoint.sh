@@ -80,7 +80,7 @@ echo ""
 # Validate environment variables
 log "Validating environment variables..."
 
-required_vars=("CRUNCHYROLL_EMAIL" "CRUNCHYROLL_PASSWORD" "ANILIST_CLIENT_ID" "ANILIST_CLIENT_SECRET")
+required_vars=("CRUNCHYROLL_EMAIL" "CRUNCHYROLL_PASSWORD" "ANILIST_AUTH_CODE")
 missing_vars=()
 
 for var in "${required_vars[@]}"; do
@@ -94,6 +94,20 @@ if [ ${#missing_vars[@]} -ne 0 ]; then
     for var in "${missing_vars[@]}"; do
         echo "  - $var"
     done
+
+    # Special message for ANILIST_AUTH_CODE
+    if [[ " ${missing_vars[@]} " =~ " ANILIST_AUTH_CODE " ]]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "To get your AniList auth code:"
+        echo "1. Visit: https://anilist.co/api/v2/oauth/authorize?client_id=21538&response_type=code"
+        echo "2. Authorize the application"
+        echo "3. Copy the code from the PIN page"
+        echo "4. Set ANILIST_AUTH_CODE in your environment or .env file"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+    fi
+
     exit 1
 fi
 
