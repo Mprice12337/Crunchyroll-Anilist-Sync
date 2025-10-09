@@ -262,7 +262,8 @@ class SyncManager:
                 logger.info(f"✅ Direct match: {anime_title} S{actual_season}E{actual_episode}")
                 self.sync_results['season_matches'] += 1
             else:
-                logger.info(f"📊 Converted: {series_title} S{cr_season}E{cr_episode} → {anime_title} S{actual_season}E{actual_episode}")
+                logger.info(
+                    f"📊 Converted: {series_title} S{cr_season}E{cr_episode} → {anime_title} S{actual_season}E{actual_episode}")
                 self.sync_results['episode_conversions'] += 1
                 if actual_season != cr_season:
                     self.sync_results['season_mismatches'] += 1
@@ -272,7 +273,8 @@ class SyncManager:
 
                 existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
                 if existing_entry:
-                    is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, actual_episode, total_episodes)
+                    is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, actual_episode,
+                                                                          total_episodes)
                     if is_rewatch:
                         logger.info("[DRY RUN] Rewatch would be detected")
                         self.sync_results['rewatches_detected'] += 1
@@ -434,7 +436,8 @@ class SyncManager:
                 continue
 
             result_title = self._get_anime_title(result).lower()
-            is_space_removed_match = no_space_title != series_title.lower() and no_space_title in result_title.replace(' ', '')
+            is_space_removed_match = no_space_title != series_title.lower() and no_space_title in result_title.replace(
+                ' ', '')
 
             start_date = result.get('startDate', {}) or {}
             year = start_date.get('year') if start_date.get('year') is not None else 9999
@@ -544,7 +547,8 @@ class SyncManager:
         return 1
 
     def _determine_correct_entry_and_episode(self, series_title: str, cr_season: int,
-                                             cr_episode: int, season_structure: Dict) -> Tuple[Optional[Dict], int, int]:
+                                             cr_episode: int, season_structure: Dict) -> Tuple[
+        Optional[Dict], int, int]:
         """Determine the correct AniList entry and episode number."""
         if cr_season > 1 and season_structure:
             base_title_normalized = series_title.lower().replace(' ', '')
@@ -569,7 +573,8 @@ class SyncManager:
                         best_season_num = season_num
 
                         if cr_episode <= max_episodes:
-                            logger.info(f"✅ Found matching series: {season_data['title']} - using as season {season_num}")
+                            logger.info(
+                                f"✅ Found matching series: {season_data['title']} - using as season {season_num}")
                             return best_entry, season_num, cr_episode
 
             # Always try cumulative episode conversion when cr_season > 1
@@ -586,8 +591,10 @@ class SyncManager:
                         episode_in_season = cr_episode - cumulative_episodes
 
                         if episode_in_season > 0:
-                            logger.info(f"📊 Episode {cr_episode} maps to Season {season_num} Episode {episode_in_season}")
-                            logger.info(f"   (Cumulative: {cumulative_episodes}, Season has {season_episodes} episodes)")
+                            logger.info(
+                                f"📊 Episode {cr_episode} maps to Season {season_num} Episode {episode_in_season}")
+                            logger.info(
+                                f"   (Cumulative: {cumulative_episodes}, Season has {season_episodes} episodes)")
                             return season_data['entry'], season_num, episode_in_season
 
                     cumulative_episodes += season_episodes
@@ -696,7 +703,8 @@ class SyncManager:
                     is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, 1, 1)
                     if is_rewatch:
                         current_repeat = existing_entry.get('repeat', 0)
-                        logger.info(f"[DRY RUN] Movie rewatch would be detected (new repeat count: {current_repeat + 1})")
+                        logger.info(
+                            f"[DRY RUN] Movie rewatch would be detected (new repeat count: {current_repeat + 1})")
                         self.sync_results['rewatches_detected'] += 1
                         self.sync_results['rewatches_completed'] += 1
                     else:
@@ -780,7 +788,8 @@ class SyncManager:
             logger.info("🔄 Rewatch detection is active - completed series are marked as 'watching' when rewatched")
 
         if results['rewatches_completed'] > 0:
-            logger.info(f"🏁 {results['rewatches_completed']} rewatch(es) were completed and rewatch count was incremented")
+            logger.info(
+                f"🏁 {results['rewatches_completed']} rewatch(es) were completed and rewatch count was incremented")
 
     def _save_debug_data(self, filename: str, data: Any) -> None:
         """Save debug data for troubleshooting."""

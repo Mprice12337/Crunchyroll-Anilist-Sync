@@ -170,7 +170,8 @@ class AniListAPI:
                     user_info = entry.get('user', {})
 
                     if user_info.get('id') != user_id:
-                        logger.error(f"API returned entry for wrong user. Expected {user_id}, got {user_info.get('id')}")
+                        logger.error(
+                            f"API returned entry for wrong user. Expected {user_id}, got {user_info.get('id')}")
                         return None
 
                     return entry
@@ -182,7 +183,7 @@ class AniListAPI:
             return None
 
     def update_anime_progress(self, anime_id: int, progress: int, access_token: str,
-                             status: Optional[str] = None, repeat: Optional[int] = None) -> bool:
+                              status: Optional[str] = None, repeat: Optional[int] = None) -> bool:
         """
         Update anime progress on user's list
 
@@ -287,7 +288,7 @@ class AniListAPI:
         return None
 
     def _execute_query(self, query: str, variables: Optional[Dict[str, Any]] = None,
-                      access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                       access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Execute a GraphQL query with automatic retry and rate limiting
 

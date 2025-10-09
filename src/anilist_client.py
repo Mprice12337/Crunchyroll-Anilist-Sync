@@ -44,7 +44,7 @@ class AniListClient:
         return self.api.get_anime_list_entry(anime_id, self.auth.access_token)
 
     def update_anime_progress(self, anime_id: int, progress: int, status: Optional[str] = None,
-                             repeat: Optional[int] = None) -> bool:
+                              repeat: Optional[int] = None) -> bool:
         """Update anime progress on AniList"""
         if not self.auth.is_authenticated():
             logger.error("Not authenticated! Call authenticate() first.")

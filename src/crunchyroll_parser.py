@@ -40,7 +40,8 @@ class CrunchyrollParser:
                 if is_movie and (not episode_number or episode_number <= 0):
                     episode_number = 1
 
-                if not is_movie and self._is_compilation_or_recap_content(season_title, episode_title, episode_metadata):
+                if not is_movie and self._is_compilation_or_recap_content(season_title, episode_title,
+                                                                          episode_metadata):
                     skipped += 1
                     continue
 

@@ -51,7 +51,8 @@ class AniListAuth:
             if not self._exchange_code_for_token(auth_code.strip()):
                 logger.error("Failed to exchange auth code for token")
                 logger.error("The auth code may be expired or invalid")
-                logger.error("Please get a new code from: https://anilist.co/api/v2/oauth/authorize?client_id=30142&response_type=code")
+                logger.error(
+                    "Please get a new code from: https://anilist.co/api/v2/oauth/authorize?client_id=30142&response_type=code")
                 return False
 
             if not self._get_user_info():

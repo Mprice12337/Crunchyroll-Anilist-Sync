@@ -442,7 +442,8 @@ class CrunchyrollAuth:
 
             # Window and user agent
             options.add_argument('--window-size=1920,1080')
-            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            options.add_argument(
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
             # Anti-detection
             options.add_argument('--disable-blink-features=AutomationControlled')
@@ -494,13 +495,15 @@ class CrunchyrollAuth:
 
             logger.info("✅ Chrome driver setup completed successfully")
             logger.info(f"   Chrome version: {self.driver.capabilities.get('browserVersion', 'unknown')}")
-            logger.info(f"   Driver version: {self.driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')}")
+            logger.info(
+                f"   Driver version: {self.driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'unknown')}")
 
         except Exception as e:
             logger.error(f"Failed to setup Chrome driver: {e}")
             logger.error("Detailed error information:")
             logger.error(f"  Chrome binary location: {os.environ.get('CHROME_BIN', 'not set')}")
-            logger.error(f"  Chrome binary exists: {os.path.exists(chrome_binary) if 'chrome_binary' in locals() else 'unknown'}")
+            logger.error(
+                f"  Chrome binary exists: {os.path.exists(chrome_binary) if 'chrome_binary' in locals() else 'unknown'}")
 
             # Try to get more detailed error info
             try:
