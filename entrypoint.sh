@@ -34,6 +34,11 @@ log_error() {
 cat > "$SYNC_SCRIPT" << 'EOF'
 #!/bin/bash
 
+# CRITICAL: Set PATH for cron environment
+# Cron runs with minimal PATH, so we need to explicitly set it
+PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+
 # Redirect all output to log file
 exec >> /app/logs/cron.log 2>&1
 
@@ -43,17 +48,23 @@ echo "========================================"
 
 cd /app
 
+# Verify Python is available
+if ! command -v python3 &> /dev/null; then
+    echo "❌ ERROR: python3 command not found in PATH: $PATH"
+    exit 1
+fi
+
 # Check if this is the first run
 if [ ! -f /app/_cache/.first_run_complete ]; then
     echo "🎯 First run detected - using --max-pages 1 for quick initial sync"
-    python main.py --max-pages 1
+    python3 main.py --max-pages 1
 
     # Mark first run as complete
     touch /app/_cache/.first_run_complete
     echo "✅ First run completed successfully"
 else
     echo "📚 Subsequent run - performing full sync"
-    python main.py
+    python3 main.py
 fi
 
 SYNC_EXIT_CODE=$?
@@ -127,13 +138,13 @@ echo "  • Max pages (first run): 1"
 echo "  • Max pages (subsequent): 10 (default)"
 echo ""
 
-# Run initial sync immediately
+# Run initial sync immediately (with proper PATH)
 log "Starting initial sync..."
 echo ""
 
 if [ ! -f "$FIRST_RUN_FLAG" ]; then
     log_warning "First run detected - using --max-pages 1 for quick initial sync"
-    if python main.py --max-pages 1; then
+    if python3 main.py --max-pages 1; then
         touch "$FIRST_RUN_FLAG"
         log_success "Initial sync completed successfully"
     else
@@ -142,7 +153,7 @@ if [ ! -f "$FIRST_RUN_FLAG" ]; then
     fi
 else
     log "Subsequent run - performing full sync"
-    if python main.py; then
+    if python3 main.py; then
         log_success "Initial sync completed successfully"
     else
         log_error "Initial sync failed"
