@@ -31,7 +31,9 @@ log_error() {
 }
 
 # Create the sync script that will be called by cron
-cat > "$SYNC_SCRIPT" << 'EOF'
+# CRITICAL FIX: Changed from 'EOF' to EOF to allow variable expansion
+# This ensures environment variables are embedded in the script
+cat > "$SYNC_SCRIPT" << EOF
 #!/bin/bash
 
 # CRITICAL: Set PATH for cron environment
@@ -39,18 +41,34 @@ cat > "$SYNC_SCRIPT" << 'EOF'
 PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
 
+# CRITICAL FIX: Export all required environment variables
+# Docker environment variables are NOT automatically available to cron
+export CRUNCHYROLL_EMAIL="${CRUNCHYROLL_EMAIL}"
+export CRUNCHYROLL_PASSWORD="${CRUNCHYROLL_PASSWORD}"
+export ANILIST_AUTH_CODE="${ANILIST_AUTH_CODE}"
+export FLARESOLVERR_URL="${FLARESOLVERR_URL}"
+export HEADLESS="${HEADLESS}"
+
 # Redirect all output to log file
 exec >> /app/logs/cron.log 2>&1
 
-echo "========================================"
-echo "Starting sync at $(date)"
-echo "========================================"
+echo "=========================================="
+echo "Starting sync at \$(date)"
+echo "=========================================="
+
+# Debug: Verify environment variables are set
+echo "Environment check:"
+echo "  CRUNCHYROLL_EMAIL: \${CRUNCHYROLL_EMAIL:+SET}"
+echo "  CRUNCHYROLL_PASSWORD: \${CRUNCHYROLL_PASSWORD:+SET}"
+echo "  ANILIST_AUTH_CODE: \${ANILIST_AUTH_CODE:+SET}"
+echo "  FLARESOLVERR_URL: \${FLARESOLVERR_URL:-NOT SET}"
+echo ""
 
 cd /app
 
 # Verify Python is available
 if ! command -v python3 &> /dev/null; then
-    echo "❌ ERROR: python3 command not found in PATH: $PATH"
+    echo "❌ ERROR: python3 command not found in PATH: \$PATH"
     exit 1
 fi
 
@@ -67,15 +85,15 @@ else
     python3 main.py
 fi
 
-SYNC_EXIT_CODE=$?
+SYNC_EXIT_CODE=\$?
 
-if [ $SYNC_EXIT_CODE -eq 0 ]; then
-    echo "✅ Sync completed successfully at $(date)"
+if [ \$SYNC_EXIT_CODE -eq 0 ]; then
+    echo "✅ Sync completed successfully at \$(date)"
 else
-    echo "❌ Sync failed with exit code $SYNC_EXIT_CODE at $(date)"
+    echo "❌ Sync failed with exit code \$SYNC_EXIT_CODE at \$(date)"
 fi
 
-echo "========================================"
+echo "=========================================="
 echo ""
 EOF
 
@@ -84,7 +102,7 @@ chmod +x "$SYNC_SCRIPT"
 # Display welcome banner
 echo ""
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║         Crunchyroll-AniList Sync Container v0.2.0          ║"
+echo "║         Crunchyroll-AniList Sync Container v0.2.1          ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
