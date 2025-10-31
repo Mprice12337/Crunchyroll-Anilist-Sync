@@ -197,17 +197,25 @@ class AniListClient:
             # Not at the end yet - will be CURRENT
             new_status = 'CURRENT'
 
-            # CRITICAL: Detect rewatch by status transition
-            if current_status == 'COMPLETED':
-                # Series was completed, now watching again = REWATCH!
+            # CRITICAL FIX: Only increment rewatch counter if actually rewatching from the beginning
+            # Don't increment for old episodes being processed out of order
+            if current_status == 'COMPLETED' and progress <= 3:
+                # Series was completed, now watching from beginning = REWATCH!
                 new_repeat = current_repeat + 1
                 logger.info(f"🔄 Starting rewatch #{new_repeat} (series was COMPLETED, now watching episode {progress})")
+            elif current_status == 'COMPLETED' and progress > current_progress:
+                # Moving forward from COMPLETED status (edge case: episodes added later)
+                new_repeat = current_repeat
+                logger.info(f"📺 Continuing series beyond previous completion (episode {progress})")
             else:
                 # Normal progression (PLANNING → CURRENT, or CURRENT → CURRENT)
                 new_repeat = current_repeat
 
                 if current_status in ['PLANNING', 'PAUSED']:
                     logger.info(f"▶️ Starting to watch (episode {progress})")
+                elif current_status == 'COMPLETED':
+                    # This shouldn't happen due to _needs_update checks, but just in case
+                    logger.info(f"📺 Updating completed series (episode {progress})")
                 else:
                     logger.info(f"📺 Updating progress (episode {progress})")
 

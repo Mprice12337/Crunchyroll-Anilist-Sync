@@ -53,6 +53,8 @@ class SyncManager:
 
         self.season_structure_cache = {}
         self.episode_data_cache = {}
+        # Track processed anime IDs globally to prevent duplicate processing across pages
+        self.processed_anime_entries = {}  # Key: anime_id, Value: highest_progress_processed
 
     def run_sync(self) -> bool:
         """Execute the complete synchronization process."""
@@ -250,6 +252,14 @@ class SyncManager:
 
             anime_id = matched_entry['id']
 
+            # Check if we've already processed this anime at a higher episode in this sync session
+            if anime_id in self.processed_anime_entries:
+                previous_progress = self.processed_anime_entries[anime_id]
+                if actual_episode <= previous_progress:
+                    logger.debug(f"✓ {series_title} S{actual_season}E{actual_episode} already processed at higher episode {previous_progress}, skipping")
+                    self.sync_results['skipped_episodes'] += 1
+                    return False
+
             if not self._needs_update(anime_id, actual_episode):
                 logger.debug(f"✓ {series_title} S{actual_season}E{actual_episode} already synced, skipping")
                 self.sync_results['skipped_episodes'] += 1
@@ -269,7 +279,7 @@ class SyncManager:
                     self.sync_results['season_mismatches'] += 1
 
             if self.config.get('dry_run'):
-                logger.info(f"[DRY RUN] Would update {anime_title} to episode {actual_episode} with rewatch detection")
+                logger.info(f"[DRY RUN] Would update {anime_title} to episode {actual_episode}")
 
                 existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
                 if existing_entry:
@@ -295,6 +305,8 @@ class SyncManager:
                     logger.info("[DRY RUN] Would start completely new series")
                     self.sync_results['new_series_started'] += 1
 
+                # Track this as processed to prevent duplicate processing of older episodes
+                self.processed_anime_entries[anime_id] = actual_episode
                 return True
 
             update_result = self.anilist_client.update_anime_progress_with_rewatch_logic(
@@ -312,6 +324,9 @@ class SyncManager:
                         self.sync_results['rewatches_completed'] += 1
                 elif update_result['was_new_series']:
                     self.sync_results['new_series_started'] += 1
+
+                # Track this as processed to prevent duplicate processing of older episodes
+                self.processed_anime_entries[anime_id] = actual_episode
             else:
                 logger.error(f"❌ Failed to update {anime_title}")
 
@@ -690,13 +705,19 @@ class SyncManager:
 
             logger.info(f"🎬 Found movie: {anime_title} (similarity: {best_similarity:.2f})")
 
+            # Check if we've already processed this movie in this sync session
+            if anime_id in self.processed_anime_entries:
+                logger.debug(f"✓ Movie {anime_title} already processed in this session, skipping")
+                self.sync_results['movies_skipped'] += 1
+                return False
+
             if not self._needs_update(anime_id, 1):
                 logger.info(f"✅ Movie {anime_title} already completed, skipping")
                 self.sync_results['movies_skipped'] += 1
                 return False
 
             if self.config.get('dry_run'):
-                logger.info(f"[DRY RUN] Would mark movie {anime_title} as COMPLETED with rewatch detection")
+                logger.info(f"[DRY RUN] Would mark movie {anime_title} as COMPLETED")
 
                 existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
                 if existing_entry:
@@ -716,6 +737,8 @@ class SyncManager:
                 else:
                     logger.info("[DRY RUN] Would add new movie as completed")
 
+                # Track this movie as processed
+                self.processed_anime_entries[anime_id] = 1
                 return True
 
             update_result = self.anilist_client.update_anime_progress_with_rewatch_logic(
@@ -732,6 +755,9 @@ class SyncManager:
                     self.sync_results['rewatches_detected'] += 1
                     if update_result['was_completion']:
                         self.sync_results['rewatches_completed'] += 1
+
+                # Track this movie as processed
+                self.processed_anime_entries[anime_id] = 1
             else:
                 logger.error(f"❌ Failed to update movie {anime_title}")
 
@@ -850,12 +876,21 @@ class SyncManager:
                     logger.debug(f"Anime {anime_id} already at episode {target_progress} (CURRENT) - skipping")
                     return False
 
-            # Rewatch scenario: COMPLETED series with target progress < current
-            # Only triggers for actual rewatches (going back to earlier episodes)
+            # FIXED: Skip processing old episodes instead of treating them as rewatches
+            # Old episodes from pagination should not overwrite newer progress
+            # Only consider it a rewatch if:
+            # 1. Series is COMPLETED
+            # 2. Target progress is episode 1, 2, or 3 (indicating user started over)
             if current_status == 'COMPLETED' and target_progress < current_progress:
-                logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
-                             f"now watching episode {target_progress} - needs update")
-                return True
+                if target_progress <= 3:
+                    logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
+                                 f"now watching episode {target_progress} - needs update")
+                    return True
+                else:
+                    # Old episode from pagination, skip it
+                    logger.debug(f"Anime {anime_id} skipping old episode {target_progress} "
+                                 f"(already at {current_progress}, status: {current_status})")
+                    return False
 
             # Normal progress check: skip if already at or past this episode
             if current_progress >= target_progress:

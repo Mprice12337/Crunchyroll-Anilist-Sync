@@ -41,6 +41,9 @@ cat > "$SYNC_SCRIPT" << EOF
 PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 export PATH
 
+# CRITICAL: Set timezone for consistent logging
+export TZ="${TZ:-America/New_York}"
+
 # CRITICAL FIX: Export all required environment variables
 # Docker environment variables are NOT automatically available to cron
 export CRUNCHYROLL_EMAIL="${CRUNCHYROLL_EMAIL}"
@@ -48,6 +51,9 @@ export CRUNCHYROLL_PASSWORD="${CRUNCHYROLL_PASSWORD}"
 export ANILIST_AUTH_CODE="${ANILIST_AUTH_CODE}"
 export FLARESOLVERR_URL="${FLARESOLVERR_URL}"
 export HEADLESS="${HEADLESS}"
+export DEBUG="${DEBUG}"
+export DRY_RUN="${DRY_RUN}"
+export MAX_PAGES="${MAX_PAGES}"
 
 # Redirect all output to log file
 exec >> /app/logs/cron.log 2>&1
@@ -72,17 +78,31 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
+# Build command-line flags from environment variables
+SYNC_FLAGS=""
+if [ "\${DEBUG}" = "true" ]; then
+    SYNC_FLAGS="\${SYNC_FLAGS} --debug"
+fi
+if [ "\${DRY_RUN}" = "true" ]; then
+    SYNC_FLAGS="\${SYNC_FLAGS} --dry-run"
+fi
+
 # Check if this is the first run
 if [ ! -f /app/_cache/.first_run_complete ]; then
     echo "🎯 First run detected - using --max-pages 1 for quick initial sync"
-    python3 main.py --max-pages 1
+    python3 main.py --max-pages 1 \${SYNC_FLAGS}
 
     # Mark first run as complete
     touch /app/_cache/.first_run_complete
     echo "✅ First run completed successfully"
 else
     echo "📚 Subsequent run - performing full sync"
-    python3 main.py
+    # Use MAX_PAGES if set, otherwise use default
+    if [ -n "\${MAX_PAGES}" ]; then
+        python3 main.py --max-pages \${MAX_PAGES} \${SYNC_FLAGS}
+    else
+        python3 main.py \${SYNC_FLAGS}
+    fi
 fi
 
 SYNC_EXIT_CODE=\$?
@@ -145,24 +165,42 @@ log_success "Environment variables validated"
 # Display configuration
 echo ""
 log "Configuration:"
+echo "  • Timezone: ${TZ:-America/New_York}"
 echo "  • Cron schedule: ${CRON_SCHEDULE:-0 2 * * *}"
 echo "  • Headless mode: ${HEADLESS:-true}"
+echo "  • Debug mode: ${DEBUG:-false}"
+echo "  • Dry-run mode: ${DRY_RUN:-false}"
 if [ -n "$FLARESOLVERR_URL" ]; then
     echo "  • FlareSolverr: ${FLARESOLVERR_URL}"
 else
     echo "  • FlareSolverr: Not configured (optional)"
 fi
 echo "  • Max pages (first run): 1"
-echo "  • Max pages (subsequent): 10 (default)"
+if [ -n "$MAX_PAGES" ]; then
+    echo "  • Max pages (subsequent): ${MAX_PAGES}"
+else
+    echo "  • Max pages (subsequent): 10 (default)"
+fi
 echo ""
 
 # Run initial sync immediately (with proper PATH)
 log "Starting initial sync..."
 echo ""
 
+# Build command-line flags from environment variables
+SYNC_FLAGS=""
+if [ "${DEBUG}" = "true" ]; then
+    SYNC_FLAGS="${SYNC_FLAGS} --debug"
+    log "Debug mode enabled"
+fi
+if [ "${DRY_RUN}" = "true" ]; then
+    SYNC_FLAGS="${SYNC_FLAGS} --dry-run"
+    log "Dry-run mode enabled (no changes will be made)"
+fi
+
 if [ ! -f "$FIRST_RUN_FLAG" ]; then
     log_warning "First run detected - using --max-pages 1 for quick initial sync"
-    if python3 main.py --max-pages 1; then
+    if python3 main.py --max-pages 1 ${SYNC_FLAGS}; then
         touch "$FIRST_RUN_FLAG"
         log_success "Initial sync completed successfully"
     else
@@ -171,11 +209,22 @@ if [ ! -f "$FIRST_RUN_FLAG" ]; then
     fi
 else
     log "Subsequent run - performing full sync"
-    if python3 main.py; then
-        log_success "Initial sync completed successfully"
+    # Use MAX_PAGES if set, otherwise use default
+    if [ -n "${MAX_PAGES}" ]; then
+        log "Using custom max-pages: ${MAX_PAGES}"
+        if python3 main.py --max-pages ${MAX_PAGES} ${SYNC_FLAGS}; then
+            log_success "Initial sync completed successfully"
+        else
+            log_error "Initial sync failed"
+            exit 1
+        fi
     else
-        log_error "Initial sync failed"
-        exit 1
+        if python3 main.py ${SYNC_FLAGS}; then
+            log_success "Initial sync completed successfully"
+        else
+            log_error "Initial sync failed"
+            exit 1
+        fi
     fi
 fi
 
@@ -194,19 +243,16 @@ crontab -l | sed 's/^/  /'
 
 log_success "Cron service configured"
 
-# Start cron in the foreground
-log "Starting cron daemon..."
+# Create initial log file if it doesn't exist
+touch "$LOG_FILE"
+
+# Start cron in FOREGROUND mode (this keeps the container running)
+log "Starting cron daemon in foreground mode..."
 log_success "Container is running! Sync will run according to schedule: ${CRON_SCHEDULE}"
 echo ""
 log "Logs are being written to: ${LOG_FILE}"
-log "View logs with: docker logs -f <container_name>"
+log "View cron logs with: docker exec <container_name> tail -f /app/logs/cron.log"
 echo ""
-
-# Start cron and tail the log file
-cron
-
-# Create initial log file if it doesn't exist
-touch "$LOG_FILE"
 
 # Display next scheduled run
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -214,5 +260,6 @@ echo "║                    Service is Running                      ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
-# Tail logs to keep container running and show output
-tail -f "$LOG_FILE"
+# CRITICAL FIX: Use 'cron -f' to run in foreground
+# This keeps the container alive without relying on tail
+exec cron -f

@@ -5,12 +5,16 @@ A simplified Python application that automatically syncs your Crunchyroll watch 
 ## Features
 
 - 🔐 Secure authentication with both Crunchyroll and AniList
-- 📚 Scrapes Crunchyroll watch history with pagination support
-- 🎯 Intelligent anime title matching between platforms
-- 📈 Updates AniList progress based on your viewing history
+- 📚 Scrapes Crunchyroll watch history with smart pagination and early stopping
+- 🎯 Intelligent anime title matching between platforms with fuzzy search
+- 📈 Updates AniList progress with accurate episode conversion (absolute → per-season)
+- 🔄 Intelligent rewatch detection with proper repeat counter management
 - 💾 Smart caching to minimize re-authentication and API calls
-- 🐳 Docker support with optional FlareSolverr integration
-- 🔧 Simple configuration and straightforward operation
+- 🚫 Global deduplication prevents duplicate processing across pages
+- 🐳 Docker support with cron scheduling for automated syncs
+- 🛡️ Optional FlareSolverr integration for Cloudflare bypass
+- 🔍 Debug mode and dry-run support for testing
+- 🔧 Simple configuration via environment variables
 
 ## Quick Start
 
@@ -154,7 +158,52 @@ Additional Docker-specific variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CRON_SCHEDULE` | `0 2 * * *` | Cron schedule for automatic syncs |
+| `TZ` | `America/New_York` | Timezone (e.g., America/Los_Angeles, Europe/London) |
 | `HEADLESS` | `true` | Run browser in headless mode |
+| `DEBUG` | `false` | Enable debug logging |
+| `DRY_RUN` | `false` | Preview changes without updating AniList |
+| `MAX_PAGES` | `10` | Maximum history pages to process (subsequent runs) |
+
+### Running on Unraid
+
+For Unraid users, you can configure the container using environment variables in the Docker template:
+
+**To enable debugging and dry-run mode:**
+1. In your Unraid Docker settings for this container, add these environment variables:
+   - `DEBUG` = `true`
+   - `DRY_RUN` = `true`
+2. Start the container
+3. The sync will run with debug logging and show what would be changed without actually updating AniList
+
+**To test the fix for completed shows:**
+```
+DEBUG=true
+DRY_RUN=true
+```
+
+**For production use (after testing):**
+```
+DEBUG=false
+DRY_RUN=false
+```
+
+**Additional optional settings:**
+```
+TZ=America/Los_Angeles    # Set your timezone (default: America/New_York)
+MAX_PAGES=5               # Process only 5 pages of history
+CRON_SCHEDULE=0 3 * * *   # Run at 3 AM instead of 2 AM
+```
+
+**Common timezone examples:**
+- US Pacific: `America/Los_Angeles`
+- US Mountain: `America/Denver`
+- US Central: `America/Chicago`
+- US Eastern: `America/New_York`
+- UK: `Europe/London`
+- Europe Central: `Europe/Paris`
+- Asia Tokyo: `Asia/Tokyo`
+
+**Note:** Changes to environment variables require restarting the container to take effect.
 
 ## Optional: FlareSolverr Setup
 
@@ -199,6 +248,22 @@ FLARESOLVERR_URL=http://localhost:8191
    - The anime might not be on AniList
    - Title matching might fail for obscure shows
    - Check the debug logs for matching details
+
+## Documentation
+
+For developers and contributors:
+
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Technical architecture and system design
+- **[CLAUDE.md](docs/CLAUDE.md)** - Claude Code configuration and coding conventions
+
+### Recent Updates
+
+**v0.2.1 (2025-01-30)** - Critical Bug Fixes
+- Fixed completed shows being incorrectly marked as "still watching"
+- Fixed incorrect rewatch counter increments
+- Added global deduplication to prevent duplicate processing across pages
+- Improved rewatch detection to only trigger on episodes 1-3
+- Added support for DEBUG, DRY_RUN, and MAX_PAGES environment variables in Docker
 
 ## License
 
