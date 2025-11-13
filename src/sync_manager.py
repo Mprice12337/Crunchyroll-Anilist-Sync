@@ -871,9 +871,9 @@ class SyncManager:
                     # Already completed at this episode, no need to update
                     logger.debug(f"Anime {anime_id} already completed at episode {target_progress} - skipping")
                     return False
-                elif current_status == 'CURRENT':
-                    # Already watching at this exact episode, no need to update
-                    logger.debug(f"Anime {anime_id} already at episode {target_progress} (CURRENT) - skipping")
+                elif current_status in ['CURRENT', 'REPEATING']:
+                    # Already watching/rewatching at this exact episode, no need to update
+                    logger.debug(f"Anime {anime_id} already at episode {target_progress} ({current_status}) - skipping")
                     return False
 
             # FIXED: Skip processing old episodes instead of treating them as rewatches
