@@ -199,9 +199,11 @@ class AniListClient:
 
         else:
             # Not at the end yet - determine if REPEATING or CURRENT
-            # CRITICAL FIX: Only increment rewatch counter if actually rewatching from the beginning
-            # Don't increment for old episodes being processed out of order
-            if current_status == 'COMPLETED' and progress <= 3:
+            # Rewatch detection: Series was COMPLETED, now watching earlier episodes
+            # Use a more generous threshold to handle users who binge multiple episodes
+            # before the script runs (e.g., episodes 1-5)
+            rewatch_threshold = max(6, int(current_progress * 0.25))
+            if current_status == 'COMPLETED' and progress <= rewatch_threshold and progress < current_progress:
                 # Series was completed, now watching from beginning = REWATCH!
                 # Use REPEATING status instead of CURRENT, and increment repeat counter
                 new_status = 'REPEATING'
