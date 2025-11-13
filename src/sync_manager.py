@@ -876,26 +876,15 @@ class SyncManager:
                     logger.debug(f"Anime {anime_id} already at episode {target_progress} ({current_status}) - skipping")
                     return False
 
-            # FIXED: Skip processing old episodes instead of treating them as rewatches
-            # Old episodes from pagination should not overwrite newer progress
-            # Rewatch detection: Series is COMPLETED and watching earlier episodes
-            # Use a more generous threshold to handle users who binge multiple episodes
-            # before the script runs (e.g., episodes 1-5)
+            # Rewatch detection: If series is COMPLETED and watching earlier episodes, it's a rewatch
+            # The only way to be watching episode 9 when you completed at episode 12 is if you're rewatching
             if current_status == 'COMPLETED' and target_progress < current_progress:
-                # Consider it a rewatch if watching early episodes (first 25% or first 6 episodes)
-                rewatch_threshold = max(6, int(current_progress * 0.25))
-                if target_progress <= rewatch_threshold:
-                    logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
-                                 f"now watching episode {target_progress} - needs update")
-                    return True
-                else:
-                    # Old episode from pagination, skip it
-                    logger.debug(f"Anime {anime_id} skipping old episode {target_progress} "
-                                 f"(already at {current_progress}, status: {current_status})")
-                    return False
+                logger.debug(f"Anime {anime_id} rewatch detected: COMPLETED at {current_progress}, "
+                             f"now watching episode {target_progress} - needs update")
+                return True
 
             # If currently REPEATING, allow progress updates even if < current_progress
-            # This handles cases where user watches episodes 1-5+ during a rewatch
+            # This handles ongoing rewatch progress
             if current_status == 'REPEATING' and target_progress < current_progress:
                 logger.debug(f"Anime {anime_id} rewatch in progress: updating to episode {target_progress}")
                 return True
