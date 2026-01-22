@@ -56,6 +56,13 @@ class SyncManager:
         # Track processed anime IDs globally to prevent duplicate processing across pages
         self.processed_anime_entries = {}  # Key: anime_id, Value: highest_progress_processed
 
+        # Initialize debug collector if enabled
+        self.debug_collector = None
+        if config.get('debug_matching'):
+            from debug_collector import DebugCollector
+            self.debug_collector = DebugCollector()
+            logger.info("Debug matching mode enabled - data will be collected")
+
     def run_sync(self) -> bool:
         """Execute the complete synchronization process."""
         try:
@@ -134,6 +141,14 @@ class SyncManager:
                     logger.info("No more episodes to process")
                     break
 
+                # Record page data for debug collector
+                if self.debug_collector:
+                    self.debug_collector.record_crunchyroll_page(
+                        page_num,
+                        getattr(self.crunchyroll_scraper, '_last_raw_response', []),
+                        episodes
+                    )
+
                 page_stats = self._process_page_episodes(episodes)
                 total_processed += len(episodes)
 
@@ -210,6 +225,20 @@ class SyncManager:
             episode_data = self.episode_data_cache.get((series_title, 0), {})
             return self._process_movie(series_title, episode_data)
 
+        # Initialize debug decision record
+        decision = {
+            'input': {
+                'series_title': series_title,
+                'cr_season': cr_season,
+                'cr_episode': cr_episode,
+                'is_movie': False
+            },
+            'candidates': [],
+            'season_structure': {},
+            'selected': None,
+            'outcome': 'no_match'
+        } if self.debug_collector else None
+
         try:
             logger.info(f"🔍 Searching AniList for: {series_title}")
 
@@ -235,11 +264,37 @@ class SyncManager:
             if not search_results:
                 logger.warning(f"❌ No AniList results found for: {series_title}")
                 self.sync_results['no_matches_found'] += 1
+                if decision:
+                    decision['outcome'] = 'no_match'
+                    self.debug_collector.record_matching_decision(decision)
                 return False
 
             logger.info(f"📚 Found {len(search_results)} AniList entries")
 
+            # Record candidates with similarity scores for debug
+            if decision:
+                for result in search_results:
+                    similarity = self.anime_matcher._calculate_title_similarity(series_title, result)
+                    decision['candidates'].append({
+                        'anilist_id': result.get('id'),
+                        'title': self._get_anime_title(result),
+                        'format': result.get('format'),
+                        'episodes': result.get('episodes'),
+                        'similarity_score': similarity
+                    })
+
             season_structure = self._build_season_structure_from_anilist(search_results, series_title)
+
+            # Record season structure for debug
+            if decision:
+                decision['season_structure'] = {
+                    str(k): {
+                        'id': v.get('id'),
+                        'title': v.get('title'),
+                        'episodes': v.get('episodes'),
+                        'similarity': v.get('similarity')
+                    } for k, v in season_structure.items()
+                }
 
             matched_entry, actual_season, actual_episode = self._determine_correct_entry_and_episode(
                 series_title, cr_season, cr_episode, season_structure
@@ -248,9 +303,13 @@ class SyncManager:
             if not matched_entry:
                 logger.warning(f"❌ Could not determine correct AniList entry for {series_title}")
                 self.sync_results['no_matches_found'] += 1
+                if decision:
+                    decision['outcome'] = 'no_match'
+                    self.debug_collector.record_matching_decision(decision)
                 return False
 
             anime_id = matched_entry['id']
+            anime_title = self._get_anime_title(matched_entry)
 
             # Check if we've already processed this anime at a higher episode in this sync session
             if anime_id in self.processed_anime_entries:
@@ -258,25 +317,58 @@ class SyncManager:
                 if actual_episode <= previous_progress:
                     logger.debug(f"✓ {series_title} S{actual_season}E{actual_episode} already processed at higher episode {previous_progress}, skipping")
                     self.sync_results['skipped_episodes'] += 1
+                    if decision:
+                        decision['selected'] = {
+                            'anilist_id': anime_id,
+                            'title': anime_title,
+                            'mapped_season': actual_season,
+                            'mapped_episode': actual_episode,
+                            'reason': f'Already processed at higher episode {previous_progress}'
+                        }
+                        decision['outcome'] = 'skipped'
+                        self.debug_collector.record_matching_decision(decision)
                     return False
 
             if not self._needs_update(anime_id, actual_episode):
                 logger.debug(f"✓ {series_title} S{actual_season}E{actual_episode} already synced, skipping")
                 self.sync_results['skipped_episodes'] += 1
+                if decision:
+                    decision['selected'] = {
+                        'anilist_id': anime_id,
+                        'title': anime_title,
+                        'mapped_season': actual_season,
+                        'mapped_episode': actual_episode,
+                        'reason': 'Already synced on AniList'
+                    }
+                    decision['outcome'] = 'skipped'
+                    self.debug_collector.record_matching_decision(decision)
                 return False
 
-            anime_title = self._get_anime_title(matched_entry)
             total_episodes = matched_entry.get('episodes')
 
             if actual_season == cr_season and actual_episode == cr_episode:
                 logger.info(f"✅ Direct match: {anime_title} S{actual_season}E{actual_episode}")
                 self.sync_results['season_matches'] += 1
+                match_reason = 'Direct match'
             else:
                 logger.info(
                     f"📊 Converted: {series_title} S{cr_season}E{cr_episode} → {anime_title} S{actual_season}E{actual_episode}")
                 self.sync_results['episode_conversions'] += 1
                 if actual_season != cr_season:
                     self.sync_results['season_mismatches'] += 1
+                match_reason = f'Converted from S{cr_season}E{cr_episode}'
+
+            # Record the successful selection for debug
+            if decision:
+                decision['selected'] = {
+                    'anilist_id': anime_id,
+                    'title': anime_title,
+                    'mapped_season': actual_season,
+                    'mapped_episode': actual_episode,
+                    'reason': match_reason
+                }
+                decision['outcome'] = 'matched'
+                self.debug_collector.record_matching_decision(decision)
 
             if self.config.get('dry_run'):
                 logger.info(f"[DRY RUN] Would update {anime_title} to episode {actual_episode}")
@@ -334,6 +426,10 @@ class SyncManager:
 
         except Exception as e:
             logger.error(f"Error processing {series_title}: {e}")
+            if decision:
+                decision['outcome'] = 'no_match'
+                decision['error'] = str(e)
+                self.debug_collector.record_matching_decision(decision)
             return False
 
     def _process_page_episodes(self, episodes: List[Dict]) -> Dict[str, int]:
@@ -373,6 +469,10 @@ class SyncManager:
         clean_title = self._clean_title_for_search(series_title)
         results = self.anilist_client.search_anime(series_title)
 
+        # Record primary search for debug collector
+        if self.debug_collector:
+            self.debug_collector.record_anilist_search(series_title, results, "primary")
+
         if not results:
             results = self.anilist_client.search_anime(series_title)
 
@@ -380,6 +480,11 @@ class SyncManager:
             no_space_title = series_title.replace(' ', '')
             if no_space_title != series_title:
                 space_removed_results = self.anilist_client.search_anime(no_space_title)
+
+                # Record space-removed search for debug collector
+                if self.debug_collector:
+                    self.debug_collector.record_anilist_search(no_space_title, space_removed_results, "no_space")
+
                 if space_removed_results:
                     logger.debug(f"Found results by removing spaces: {no_space_title}")
 
@@ -408,11 +513,49 @@ class SyncManager:
         base_title = self._clean_title_for_search(series_title)
         no_space_title = series_title.replace(' ', '').lower()
 
+        # Minimum similarity threshold to include in season structure
+        # This prevents unrelated anime from being included
+        # Set to 0.7 to filter out false positives like "Kitty's Paradise" (0.69) for "Hell's Paradise"
+        MIN_SIMILARITY_THRESHOLD = 0.7
+
         series_groups = {}
 
         for result in search_results:
             format_type = (result.get('format', '') or '').upper()
-            if format_type in ['MOVIE', 'SPECIAL', 'OVA', 'ONA']:
+            # Allow ONA format for series with multiple episodes (not just shorts/specials)
+            episode_count = result.get('episodes')  # Can be None, 0, or a number
+            if format_type in ['MOVIE', 'SPECIAL', 'OVA']:
+                continue
+            # For ONAs: allow if episodes is unknown (None) or >= 3
+            # Exclude ONAs with 1-2 episodes (likely specials/shorts)
+            if format_type == 'ONA' and episode_count is not None and episode_count < 3:
+                continue
+
+            # Exclude supplemental/commentary ONAs and ONAs with subtitles (these aren't main seasons)
+            # ONAs with subtitles (indicated by colon) are typically specials/extras, not main seasons
+            result_title = self._get_anime_title(result)
+            result_title_lower = result_title.lower()
+            supplemental_keywords = ['kaisetsu', 'commentary', 'recap', 'digest', 'summary']
+
+            if format_type == 'ONA':
+                # Exclude if it has supplemental keywords
+                if any(keyword in result_title_lower for keyword in supplemental_keywords):
+                    logger.debug(f"Excluding supplemental ONA: {result_title}")
+                    continue
+                # Exclude if it has a subtitle (colon after the base title)
+                # This filters out "Series: Subtitle" style ONAs which are usually specials
+                if ':' in result_title:
+                    base_part = result_title.split(':')[0].strip()
+                    # Only exclude if the base part closely matches the series title
+                    # This prevents excluding titles where the colon is part of the main title
+                    if self.anime_matcher._calculate_title_similarity(series_title, {'title': {'romaji': base_part}}) > 0.8:
+                        logger.debug(f"Excluding ONA with subtitle: {result_title}")
+                        continue
+
+            # Pre-filter by similarity to avoid including unrelated anime
+            similarity = self.anime_matcher._calculate_title_similarity(series_title, result)
+            if similarity < MIN_SIMILARITY_THRESHOLD:
+                logger.debug(f"Excluding {self._get_anime_title(result)} from season structure (similarity {similarity:.2f} < {MIN_SIMILARITY_THRESHOLD})")
                 continue
 
             result_title = self._get_anime_title(result)
@@ -441,14 +584,25 @@ class SyncManager:
                 logger.debug(f"Found primary series group: {group_name}")
                 break
 
+        # If no primary group found, use all entries from series_groups
+        # DO NOT fall back to raw search_results as that bypasses similarity filtering
         if not primary_group:
-            primary_group = search_results
+            primary_group = []
+            for group_data in series_groups.values():
+                primary_group.extend(group_data['entries'])
 
         tv_series = []
         for result in primary_group:
             format_type = (result.get('format', '') or '').upper()
-            if format_type in ['MOVIE', 'SPECIAL', 'OVA', 'ONA']:
+            # Don't exclude ONA here - we already filtered appropriately above
+            if format_type in ['MOVIE', 'SPECIAL', 'OVA']:
                 continue
+            # Re-check ONA episode count (in case it came from multiple groups)
+            if format_type == 'ONA':
+                episode_count = result.get('episodes')
+                # Exclude short ONAs (1-2 episodes), but allow unknown (None) or >= 3
+                if episode_count is not None and episode_count < 3:
+                    continue
 
             result_title = self._get_anime_title(result).lower()
             is_space_removed_match = no_space_title != series_title.lower() and no_space_title in result_title.replace(
@@ -488,7 +642,29 @@ class SyncManager:
             if series_data['is_space_removed_match']:
                 similarity += 0.3
 
+            # Check if we should add or replace this season slot
+            # Prefer TV format over ONA when both compete for same season
+            should_add = False
+            current_format = result.get('format', '').upper()
+
             if actual_season not in season_structure:
+                # Season slot is empty, add it
+                should_add = True
+            else:
+                # Season slot occupied - check if we should replace
+                existing_entry = season_structure[actual_season]['entry']
+                existing_format = existing_entry.get('format', '').upper()
+
+                # Replace if: current is TV and existing is ONA
+                # Or if same format but higher similarity
+                if current_format == 'TV' and existing_format == 'ONA':
+                    should_add = True
+                    logger.debug(f"  Replacing ONA with TV for Season {actual_season}")
+                elif current_format == existing_format and similarity > season_structure[actual_season].get('similarity', 0):
+                    should_add = True
+                    logger.debug(f"  Replacing with higher similarity entry for Season {actual_season}")
+
+            if should_add:
                 season_structure[actual_season] = {
                     'entry': result,
                     'episodes': series_data['episodes'],
@@ -499,6 +675,46 @@ class SyncManager:
                 }
 
                 logger.debug(f"  Season {actual_season}: {series_data['title']} ({series_data['episodes']} episodes)")
+
+        # Fallback: if season_structure is empty but we have search_results,
+        # include TV format entries regardless of similarity threshold
+        # This handles franchise cases where all titles have similar but low similarity scores
+        if not season_structure and search_results:
+            logger.debug("Season structure empty - retrying with relaxed similarity threshold for TV format")
+            tv_fallback = []
+            for result in search_results:
+                format_type = (result.get('format', '') or '').upper()
+                if format_type == 'TV':
+                    result_title = self._get_anime_title(result).lower()
+                    # Still exclude supplemental content
+                    if any(kw in result_title for kw in ['kaisetsu', 'commentary', 'recap', 'digest', 'summary']):
+                        continue
+
+                    start_date = result.get('startDate', {}) or {}
+                    year = start_date.get('year') if start_date.get('year') is not None else 9999
+                    month = start_date.get('month') if start_date.get('month') is not None else 12
+                    day = start_date.get('day') if start_date.get('day') is not None else 31
+                    release_order = year * 10000 + month * 100 + day
+
+                    tv_fallback.append({
+                        'entry': result,
+                        'release_order': release_order,
+                        'episodes': result.get('episodes', 0)
+                    })
+
+            tv_fallback.sort(key=lambda x: x['release_order'])
+            for idx, series_data in enumerate(tv_fallback, 1):
+                result = series_data['entry']
+                similarity = self.anime_matcher._calculate_title_similarity(series_title, result)
+                season_structure[idx] = {
+                    'entry': result,
+                    'episodes': series_data['episodes'],
+                    'title': self._get_anime_title(result),
+                    'similarity': similarity,
+                    'id': result['id'],
+                    'release_order': series_data['release_order']
+                }
+                logger.debug(f"  Fallback Season {idx}: {self._get_anime_title(result)} (similarity: {similarity:.2f})")
 
         return season_structure
 
@@ -592,9 +808,17 @@ class SyncManager:
                                 f"✅ Found matching series: {season_data['title']} - using as season {season_num}")
                             return best_entry, season_num, cr_episode
 
-            # Always try cumulative episode conversion when cr_season > 1
-            # This handles absolute episode numbers (e.g., episode 45 -> Season 2 Episode 21)
-            if best_entry:
+            # Try cumulative episode conversion when episode number seems to be absolute
+            # This handles cases where CR uses absolute numbering (e.g., S2E15 -> actual S2E2)
+            # Check if cr_episode exceeds the target season's max episodes
+            should_try_cumulative = False
+            if cr_season in season_structure:
+                target_season_eps = season_structure[cr_season].get('episodes') or 999
+                if cr_episode > target_season_eps:
+                    should_try_cumulative = True
+                    logger.debug(f"Episode {cr_episode} exceeds S{cr_season} max ({target_season_eps}), trying cumulative mapping")
+
+            if best_entry or should_try_cumulative:
                 cumulative_episodes = 0
                 sorted_seasons = sorted(season_structure.keys())
 
@@ -629,7 +853,7 @@ class SyncManager:
         return None, 0, 0
 
     def _extract_base_series_title(self, title: str) -> str:
-        """Extract the base series name without season/part indicators."""
+        """Extract the base series name without season/part/arc indicators."""
         import re
 
         base = title
@@ -644,15 +868,34 @@ class SyncManager:
         for pattern in patterns:
             base = re.sub(pattern, '', base, flags=re.IGNORECASE)
 
+        # For titles with colons (subtitles/arcs), extract just the main title
+        # This handles cases like "Jujutsu Kaisen: Shimetsu Kaiyuu" -> "Jujutsu Kaisen"
         if ':' in base:
             parts = base.split(':', 1)
-            if len(parts) > 1 and re.search(r'(?:Season|Part)\s*\d+', parts[1], re.IGNORECASE):
-                base = parts[0]
+            main_part = parts[0].strip()
+            # Only use the main part if it's substantial (at least 3 chars)
+            # This prevents stripping important parts like "Re:Zero"
+            if len(main_part) >= 3:
+                base = main_part
 
         return base.strip()
 
     def _process_movie(self, series_title: str, episode_data: Dict = None) -> bool:
         """Process movie entries with skip detection."""
+        # Initialize debug decision record for movies
+        decision = {
+            'input': {
+                'series_title': series_title,
+                'cr_season': 0,
+                'cr_episode': 1,
+                'is_movie': True
+            },
+            'candidates': [],
+            'season_structure': {},
+            'selected': None,
+            'outcome': 'no_match'
+        } if self.debug_collector else None
+
         try:
             logger.info(f"🎬 Processing movie: {series_title}")
 
@@ -667,30 +910,76 @@ class SyncManager:
                     if indicator in combined_title:
                         logger.info(f"⏭️ Skipping compilation/recap content: {series_title} - {season_title}")
                         self.sync_results['movies_skipped'] += 1
+                        if decision:
+                            decision['outcome'] = 'skipped'
+                            decision['selected'] = {'reason': f'Skipped compilation/recap ({indicator})'}
+                            self.debug_collector.record_matching_decision(decision)
                         return False
 
-            search_queries = [
+            # Build search queries - prioritize the actual movie title from season_title
+            search_queries = []
+            movie_title = None
+            if episode_data:
+                movie_title = episode_data.get('season_title', '').strip()
+                if movie_title and movie_title != series_title:
+                    # The actual movie name is often in season_title
+                    search_queries.append(movie_title)
+                    search_queries.append(self._clean_title_for_search(movie_title))
+
+            search_queries.extend([
                 series_title,
                 f"{series_title} movie",
                 self._clean_title_for_search(series_title),
-            ]
+            ])
+
+            # Use movie_title for similarity comparison if available
+            comparison_title = movie_title if movie_title else series_title
 
             best_match = None
             best_similarity = 0
+            all_candidates = []
 
             for query in search_queries:
                 results = self.anilist_client.search_anime(query)
+
+                # Record searches for debug
+                if self.debug_collector:
+                    self.debug_collector.record_anilist_search(query, results, "movie_search")
+
                 if results:
                     for result in results:
                         format_type = (result.get('format', '') or '').upper()
                         if format_type not in ['MOVIE', 'SPECIAL']:
                             continue
 
+                        # Calculate similarity using both series_title and movie_title (if different)
+                        # Use the higher similarity score
                         similarity = self.anime_matcher._calculate_title_similarity(series_title, result)
+                        if movie_title and movie_title != series_title:
+                            movie_similarity = self.anime_matcher._calculate_title_similarity(movie_title, result)
+                            similarity = max(similarity, movie_similarity)
+
+                        # Record candidate for debug
+                        if decision:
+                            all_candidates.append({
+                                'anilist_id': result.get('id'),
+                                'title': self._get_anime_title(result),
+                                'format': format_type,
+                                'episodes': result.get('episodes'),
+                                'similarity_score': similarity
+                            })
 
                         if similarity > best_similarity:
                             best_similarity = similarity
                             best_match = result
+
+            # Deduplicate candidates by ID
+            if decision:
+                seen_ids = set()
+                for c in all_candidates:
+                    if c['anilist_id'] not in seen_ids:
+                        decision['candidates'].append(c)
+                        seen_ids.add(c['anilist_id'])
 
             if not best_match:
                 logger.warning(f"🎬 No movie match found for: {series_title}")
@@ -698,6 +987,9 @@ class SyncManager:
                     logger.debug(f"   Episode title: {episode_data.get('episode_title')}")
                     logger.debug(f"   Season title: {episode_data.get('season_title')}")
                 self.sync_results['movies_skipped'] += 1
+                if decision:
+                    decision['outcome'] = 'no_match'
+                    self.debug_collector.record_matching_decision(decision)
                 return False
 
             anime_title = self._get_anime_title(best_match)
@@ -709,12 +1001,44 @@ class SyncManager:
             if anime_id in self.processed_anime_entries:
                 logger.debug(f"✓ Movie {anime_title} already processed in this session, skipping")
                 self.sync_results['movies_skipped'] += 1
+                if decision:
+                    decision['selected'] = {
+                        'anilist_id': anime_id,
+                        'title': anime_title,
+                        'mapped_season': 0,
+                        'mapped_episode': 1,
+                        'reason': 'Already processed in this session'
+                    }
+                    decision['outcome'] = 'skipped'
+                    self.debug_collector.record_matching_decision(decision)
                 return False
 
             if not self._needs_update(anime_id, 1):
                 logger.info(f"✅ Movie {anime_title} already completed, skipping")
                 self.sync_results['movies_skipped'] += 1
+                if decision:
+                    decision['selected'] = {
+                        'anilist_id': anime_id,
+                        'title': anime_title,
+                        'mapped_season': 0,
+                        'mapped_episode': 1,
+                        'reason': 'Already completed on AniList'
+                    }
+                    decision['outcome'] = 'skipped'
+                    self.debug_collector.record_matching_decision(decision)
                 return False
+
+            # Record successful match for debug
+            if decision:
+                decision['selected'] = {
+                    'anilist_id': anime_id,
+                    'title': anime_title,
+                    'mapped_season': 0,
+                    'mapped_episode': 1,
+                    'reason': f'Best movie match (similarity: {best_similarity:.3f})'
+                }
+                decision['outcome'] = 'matched'
+                self.debug_collector.record_matching_decision(decision)
 
             if self.config.get('dry_run'):
                 logger.info(f"[DRY RUN] Would mark movie {anime_title} as COMPLETED")
@@ -765,6 +1089,10 @@ class SyncManager:
 
         except Exception as e:
             logger.error(f"Error processing movie {series_title}: {e}")
+            if decision:
+                decision['outcome'] = 'no_match'
+                decision['error'] = str(e)
+                self.debug_collector.record_matching_decision(decision)
 
     def _get_anime_title(self, anime_data: Dict) -> str:
         """Get the primary title from anime data."""
@@ -816,6 +1144,15 @@ class SyncManager:
         if results['rewatches_completed'] > 0:
             logger.info(
                 f"🏁 {results['rewatches_completed']} rewatch(es) were completed and rewatch count was incremented")
+
+        # Export debug data if collector is active
+        if self.debug_collector:
+            logger.info("📁 Exporting debug matching data...")
+            exported = self.debug_collector.export_all()
+            stats = self.debug_collector.get_stats()
+            logger.info(f"   Recorded {stats['matching_decisions']} matching decisions")
+            logger.info(f"   Outcomes: {stats['outcomes']['matched']} matched, "
+                        f"{stats['outcomes']['skipped']} skipped, {stats['outcomes']['no_match']} no match")
 
     def _save_debug_data(self, filename: str, data: Any) -> None:
         """Save debug data for troubleshooting."""

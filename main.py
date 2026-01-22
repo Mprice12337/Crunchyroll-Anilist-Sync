@@ -72,6 +72,8 @@ def parse_arguments() -> argparse.Namespace:
                         help='Maximum number of history pages to scrape (default: 10)')
     parser.add_argument('--clear-cache', action='store_true',
                         help='Clear all cached data before running')
+    parser.add_argument('--debug-matching', action='store_true',
+                        help='Enable detailed matching diagnostics (implies --dry-run)')
 
     return parser.parse_args()
 
@@ -127,9 +129,10 @@ def main() -> int:
             'flaresolverr_url': os.getenv('FLARESOLVERR_URL'),
             'headless': not args.no_headless,
             'max_pages': args.max_pages,
-            'dry_run': args.dry_run,
+            'dry_run': args.dry_run or args.debug_matching,
             'clear_cache': args.clear_cache,
-            'debug': args.debug  # Pass debug flag to components
+            'debug': args.debug,  # Pass debug flag to components
+            'debug_matching': args.debug_matching
         }
 
         logger.info(

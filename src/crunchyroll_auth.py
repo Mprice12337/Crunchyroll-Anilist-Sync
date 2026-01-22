@@ -471,7 +471,8 @@ class CrunchyrollAuth:
             # CRITICAL: Prevent automatic driver downloads in Docker
             # Use version_main to match installed Chrome version
             try:
-                chrome_version_output = os.popen(f'{chrome_binary} --version').read()
+                import shlex
+                chrome_version_output = os.popen(f'{shlex.quote(chrome_binary)} --version').read()
                 chrome_version = chrome_version_output.split()[-1].split('.')[0]
                 logger.info(f"Detected Chrome major version: {chrome_version}")
 

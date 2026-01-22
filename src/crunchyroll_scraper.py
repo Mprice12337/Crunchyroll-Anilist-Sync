@@ -176,6 +176,7 @@ class CrunchyrollScraper(CrunchyrollAuth, CrunchyrollParser):
 
             data = api_response.get('data', {})
             items = data.get('data', [])
+            self._last_raw_response = items  # Store for debug collector
 
             if not items:
                 return []
