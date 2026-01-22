@@ -9,6 +9,9 @@ import logging
 import argparse
 from pathlib import Path
 
+# Version
+__version__ = "1.03"
+
 # Add src to Python path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -74,6 +77,13 @@ def parse_arguments() -> argparse.Namespace:
                         help='Clear all cached data before running')
     parser.add_argument('--debug-matching', action='store_true',
                         help='Enable detailed matching diagnostics (implies --dry-run)')
+    parser.add_argument('--save-changeset', action='store_true',
+                        help='Save AniList updates to a changeset file instead of applying them (implies --dry-run)')
+    parser.add_argument('--apply-changeset', type=str, metavar='FILE',
+                        help='Apply a previously saved changeset file (skips Crunchyroll scraping)')
+    parser.add_argument('--no-early-stop', action='store_true',
+                        help='Disable early stopping when most items are already synced (useful for full scans)')
+    parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     return parser.parse_args()
 
@@ -118,6 +128,45 @@ def main() -> int:
     try:
         logger.info("🚀 Starting Crunchyroll-AniList Sync")
 
+        # Handle changeset application mode
+        if args.apply_changeset:
+            logger.info(f"📂 Applying changeset from: {args.apply_changeset}")
+
+            # Validate environment (still need AniList auth)
+            if not validate_environment():
+                return 1
+
+            # Load changeset
+            from debug_collector import DebugCollector
+            try:
+                changeset_data = DebugCollector.load_changeset(args.apply_changeset)
+            except (FileNotFoundError, ValueError) as e:
+                logger.error(f"Failed to load changeset: {e}")
+                return 1
+
+            # Apply changeset using sync manager
+            config = {
+                'crunchyroll_email': None,  # Not needed for changeset apply
+                'crunchyroll_password': None,
+                'flaresolverr_url': None,
+                'headless': True,
+                'max_pages': 0,
+                'dry_run': False,  # Actually apply the changes
+                'clear_cache': False,
+                'debug': args.debug,
+                'debug_matching': False
+            }
+
+            sync_manager = SyncManager(**config)
+
+            if sync_manager.apply_changeset(changeset_data):
+                logger.info("✅ Changeset applied successfully!")
+                return 0
+            else:
+                logger.error("❌ Failed to apply changeset")
+                return 1
+
+        # Normal sync mode
         # Validate environment
         if not validate_environment():
             return 1
@@ -129,10 +178,12 @@ def main() -> int:
             'flaresolverr_url': os.getenv('FLARESOLVERR_URL'),
             'headless': not args.no_headless,
             'max_pages': args.max_pages,
-            'dry_run': args.dry_run or args.debug_matching,
+            'dry_run': args.dry_run or args.debug_matching or args.save_changeset,
             'clear_cache': args.clear_cache,
             'debug': args.debug,  # Pass debug flag to components
-            'debug_matching': args.debug_matching
+            'debug_matching': args.debug_matching,
+            'save_changeset': args.save_changeset,
+            'no_early_stop': args.no_early_stop or args.save_changeset  # Auto-disable early stop for changesets
         }
 
         logger.info(

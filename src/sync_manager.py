@@ -58,10 +58,17 @@ class SyncManager:
 
         # Initialize debug collector if enabled
         self.debug_collector = None
-        if config.get('debug_matching'):
+        if config.get('debug_matching') or config.get('save_changeset'):
             from debug_collector import DebugCollector
             self.debug_collector = DebugCollector()
-            logger.info("Debug matching mode enabled - data will be collected")
+            if config.get('debug_matching'):
+                logger.info("Debug matching mode enabled - data will be collected")
+            if config.get('save_changeset'):
+                logger.info("Save changeset mode enabled - updates will be recorded but not applied")
+
+        # Log early stop status
+        if config.get('no_early_stop'):
+            logger.info("Early stopping disabled - will scan all requested pages")
 
     def run_sync(self) -> bool:
         """Execute the complete synchronization process."""
@@ -93,6 +100,95 @@ class SyncManager:
             return False
         finally:
             self._cleanup()
+
+    def apply_changeset(self, changeset_data: Dict[str, Any]) -> bool:
+        """
+        Apply a previously saved changeset to AniList.
+
+        Args:
+            changeset_data: Dictionary containing changeset data from DebugCollector.load_changeset()
+
+        Returns:
+            True if all updates succeeded, False otherwise
+        """
+        try:
+            logger.info(f"📋 Applying changeset with {changeset_data.get('total_changes', 0)} changes")
+            logger.info(f"📅 Changeset created: {changeset_data.get('created_at', 'unknown')}")
+
+            # Authenticate with AniList
+            logger.info("🔐 Authenticating with AniList...")
+            if not self.anilist_client.authenticate():
+                logger.error("Failed to authenticate with AniList")
+                return False
+            logger.info("✅ Authentication successful")
+
+            changes = changeset_data.get('changes', [])
+            if not changes:
+                logger.warning("No changes found in changeset")
+                return True
+
+            # Apply each change
+            successful = 0
+            failed = 0
+
+            for i, change in enumerate(changes, 1):
+                anime_id = change['anime_id']
+                anime_title = change['anime_title']
+                progress = change['progress']
+                total_episodes = change.get('total_episodes')
+                cr_source = change.get('cr_source', {})
+                update_type = change.get('update_type', 'normal')
+
+                logger.info(f"[{i}/{len(changes)}] Updating {anime_title} to episode {progress}")
+                logger.debug(f"  Source: {cr_source.get('series')} S{cr_source.get('season')}E{cr_source.get('episode')}")
+                logger.debug(f"  Update type: {update_type}")
+
+                try:
+                    update_result = self.anilist_client.update_anime_progress_with_rewatch_logic(
+                        anime_id=anime_id,
+                        progress=progress,
+                        total_episodes=total_episodes
+                    )
+
+                    if update_result['success']:
+                        successful += 1
+                        logger.info(f"✅ Successfully updated {anime_title}")
+
+                        if update_result['was_rewatch']:
+                            logger.info(f"   🔄 Rewatch detected")
+                            if update_result['was_completion']:
+                                logger.info(f"   🏁 Rewatch completed")
+                        elif update_result['was_new_series']:
+                            logger.info(f"   🆕 New series started")
+                    else:
+                        failed += 1
+                        logger.error(f"❌ Failed to update {anime_title}")
+
+                    # Small delay between updates to be respectful to the API
+                    if i < len(changes):
+                        time.sleep(0.5)
+
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"❌ Error updating {anime_title}: {e}")
+
+            # Report results
+            logger.info("=" * 60)
+            logger.info("📊 Changeset Application Results")
+            logger.info("=" * 60)
+            logger.info(f"Total changes: {len(changes)}")
+            logger.info(f"✅ Successful: {successful}")
+            logger.info(f"❌ Failed: {failed}")
+            logger.info("=" * 60)
+
+            return failed == 0
+
+        except KeyboardInterrupt:
+            logger.info("⏹️ Process interrupted by user")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to apply changeset: {e}", exc_info=True)
+            return False
 
     def _authenticate_services(self) -> bool:
         """Authenticate with both Crunchyroll and AniList."""
@@ -165,24 +261,31 @@ class SyncManager:
                             f"{page_stats['failed_updates']} failed "
                             f"({skip_ratio * 100:.0f}% skip ratio)")
 
-                # AGGRESSIVE EARLY STOP: If page 1 has high skip ratio and few updates
-                if page_num == 1:
-                    if skip_ratio >= 0.7 and page_stats['successful_updates'] <= 3:
-                        logger.info(
-                            f"✅ Stopping early - Page 1 had {page_stats['skipped_episodes']}/{total_processed_items} items skipped "
-                            f"({skip_ratio * 100:.0f}%) with only {page_stats['successful_updates']} updates")
-                        logger.info("   Your recent history is already synced!")
-                        break
+                # Early stopping logic (can be disabled with --no-early-stop)
+                if not self.config.get('no_early_stop'):
+                    # AGGRESSIVE EARLY STOP: If page 1 has high skip ratio and few updates
+                    if page_num == 1:
+                        if skip_ratio >= 0.7 and page_stats['successful_updates'] <= 3:
+                            logger.info(
+                                f"✅ Stopping early - Page 1 had {page_stats['skipped_episodes']}/{total_processed_items} items skipped "
+                                f"({skip_ratio * 100:.0f}%) with only {page_stats['successful_updates']} updates")
+                            logger.info("   Your recent history is already synced!")
+                            break
 
-                # Consecutive high-skip page detection
-                if skip_ratio >= 0.7:
-                    consecutive_high_skip_pages += 1
-                    logger.info(f"   High skip ratio detected ({consecutive_high_skip_pages}/2 consecutive pages)")
+                    # Consecutive high-skip page detection
+                    if skip_ratio >= 0.7:
+                        consecutive_high_skip_pages += 1
+                        logger.info(f"   High skip ratio detected ({consecutive_high_skip_pages}/2 consecutive pages)")
 
-                    if consecutive_high_skip_pages >= 2:
-                        logger.info("✅ Stopping early - 2 consecutive pages with >70% items already synced")
-                        break
+                        if consecutive_high_skip_pages >= 2:
+                            logger.info("✅ Stopping early - 2 consecutive pages with >70% items already synced")
+                            break
+                    else:
+                        consecutive_high_skip_pages = 0
                 else:
+                    # Just log high skip ratio but don't stop
+                    if skip_ratio >= 0.7:
+                        logger.info(f"   High skip ratio detected ({skip_ratio * 100:.0f}%) - continuing (early stop disabled)")
                     consecutive_high_skip_pages = 0
 
                 time.sleep(0.5)
@@ -374,12 +477,15 @@ class SyncManager:
                 logger.info(f"[DRY RUN] Would update {anime_title} to episode {actual_episode}")
 
                 existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+                update_type = 'normal'
+
                 if existing_entry:
                     is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, actual_episode,
                                                                           total_episodes)
                     if is_rewatch:
                         logger.info("[DRY RUN] Rewatch would be detected")
                         self.sync_results['rewatches_detected'] += 1
+                        update_type = 'rewatch'
 
                         if total_episodes and actual_episode >= total_episodes:
                             current_repeat = existing_entry.get('repeat', 0)
@@ -391,11 +497,30 @@ class SyncManager:
                         if current_status == 'PLANNING' or current_progress == 0:
                             logger.info("[DRY RUN] Would start new series")
                             self.sync_results['new_series_started'] += 1
+                            update_type = 'new_series'
                         else:
                             logger.info("[DRY RUN] Would continue normal progress")
                 else:
                     logger.info("[DRY RUN] Would start completely new series")
                     self.sync_results['new_series_started'] += 1
+                    update_type = 'new_series'
+
+                # Record changeset entry if save_changeset is enabled
+                if self.config.get('save_changeset') and self.debug_collector:
+                    cr_source = {
+                        'series': series_title,
+                        'season': cr_season,
+                        'episode': cr_episode,
+                        'is_movie': False  # This method handles non-movies only
+                    }
+                    self.debug_collector.record_changeset_entry(
+                        anime_id=anime_id,
+                        anime_title=anime_title,
+                        progress=actual_episode,
+                        total_episodes=total_episodes,
+                        cr_source=cr_source,
+                        update_type=update_type
+                    )
 
                 # Track this as processed to prevent duplicate processing of older episodes
                 self.processed_anime_entries[anime_id] = actual_episode
@@ -1044,6 +1169,8 @@ class SyncManager:
                 logger.info(f"[DRY RUN] Would mark movie {anime_title} as COMPLETED")
 
                 existing_entry = self.anilist_client.get_anime_list_entry(anime_id)
+                update_type = 'normal'
+
                 if existing_entry:
                     is_rewatch = self.anilist_client._is_rewatch_scenario(existing_entry, 1, 1)
                     if is_rewatch:
@@ -1052,14 +1179,34 @@ class SyncManager:
                             f"[DRY RUN] Movie rewatch would be detected (new repeat count: {current_repeat + 1})")
                         self.sync_results['rewatches_detected'] += 1
                         self.sync_results['rewatches_completed'] += 1
+                        update_type = 'rewatch'
                     else:
                         current_status = existing_entry.get('status')
                         if current_status in ['PLANNING', None] or existing_entry.get('progress', 0) == 0:
                             logger.info("[DRY RUN] Would mark new movie as completed")
+                            update_type = 'new_series'
                         else:
                             logger.info("[DRY RUN] Would update existing movie entry")
                 else:
                     logger.info("[DRY RUN] Would add new movie as completed")
+                    update_type = 'new_series'
+
+                # Record changeset entry if save_changeset is enabled
+                if self.config.get('save_changeset') and self.debug_collector:
+                    cr_source = {
+                        'series': series_title,
+                        'season': 0,
+                        'episode': 1,
+                        'is_movie': True
+                    }
+                    self.debug_collector.record_changeset_entry(
+                        anime_id=anime_id,
+                        anime_title=anime_title,
+                        progress=1,
+                        total_episodes=1,
+                        cr_source=cr_source,
+                        update_type=update_type
+                    )
 
                 # Track this movie as processed
                 self.processed_anime_entries[anime_id] = 1

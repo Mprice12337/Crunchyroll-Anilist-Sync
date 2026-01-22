@@ -24,6 +24,7 @@ class DebugCollector:
         self.crunchyroll_pages: List[Dict[str, Any]] = []
         self.anilist_searches: List[Dict[str, Any]] = []
         self.matching_decisions: List[Dict[str, Any]] = []
+        self.changeset_entries: List[Dict[str, Any]] = []
 
         self._decision_counter = 0
 
@@ -117,6 +118,39 @@ class DebugCollector:
         logger.debug(f"Recorded decision #{self._decision_counter}: "
                      f"{input_data.get('series_title')} -> {outcome}")
 
+    def record_changeset_entry(self, anime_id: int, anime_title: str, progress: int,
+                                total_episodes: Optional[int], cr_source: Dict[str, Any],
+                                update_type: str = 'normal') -> None:
+        """
+        Record an AniList update that would be made.
+
+        Args:
+            anime_id: AniList media ID
+            anime_title: AniList anime title
+            progress: Episode number to update to
+            total_episodes: Total episodes in the series (if known)
+            cr_source: Source data from Crunchyroll
+                {
+                    'series': str,
+                    'season': int,
+                    'episode': int,
+                    'is_movie': bool
+                }
+            update_type: Type of update ('normal', 'rewatch', 'new_series')
+        """
+        entry = {
+            'anime_id': anime_id,
+            'anime_title': anime_title,
+            'progress': progress,
+            'total_episodes': total_episodes,
+            'cr_source': cr_source,
+            'update_type': update_type,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        self.changeset_entries.append(entry)
+        logger.debug(f"Recorded changeset entry: {anime_title} -> E{progress}")
+
     def export_all(self) -> Dict[str, Path]:
         """Export all collected data to files. Returns paths to created files."""
         exported_files = {}
@@ -140,6 +174,11 @@ class DebugCollector:
         summary_file = self._export_matching_summary_csv()
         if summary_file:
             exported_files['matching_summary'] = summary_file
+
+        # Export changeset (if any entries recorded)
+        changeset_file = self._export_changeset()
+        if changeset_file:
+            exported_files['changeset'] = changeset_file
 
         logger.info(f"Debug data exported to {self.output_dir}/")
         for name, path in exported_files.items():
@@ -265,12 +304,80 @@ class DebugCollector:
 
         return filepath
 
+    def _export_changeset(self) -> Optional[Path]:
+        """Export changeset to JSON in _cache/changesets/ directory."""
+        if not self.changeset_entries:
+            return None
+
+        # Use dedicated changesets directory
+        changeset_dir = Path("_cache/changesets")
+        changeset_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"changeset_{self.session_timestamp}.json"
+        filepath = changeset_dir / filename
+
+        data = {
+            'created_at': datetime.now().isoformat(),
+            'session_timestamp': self.session_timestamp,
+            'total_changes': len(self.changeset_entries),
+            'changes': self.changeset_entries
+        }
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+        logger.info(f"Changeset saved to {filepath}")
+        return filepath
+
+    @staticmethod
+    def load_changeset(filepath: str) -> Dict[str, Any]:
+        """
+        Load and validate a changeset file.
+
+        Args:
+            filepath: Path to the changeset JSON file
+
+        Returns:
+            Dictionary containing changeset data
+
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            ValueError: If file format is invalid
+        """
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Changeset file not found: {filepath}")
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in changeset file: {e}")
+
+        # Validate structure
+        if 'changes' not in data:
+            raise ValueError("Invalid changeset format: missing 'changes' field")
+
+        if not isinstance(data['changes'], list):
+            raise ValueError("Invalid changeset format: 'changes' must be a list")
+
+        # Validate each change entry
+        required_fields = ['anime_id', 'anime_title', 'progress']
+        for i, change in enumerate(data['changes']):
+            for field in required_fields:
+                if field not in change:
+                    raise ValueError(f"Change #{i+1} missing required field: {field}")
+
+        logger.info(f"Loaded changeset with {len(data['changes'])} entries from {filepath}")
+        return data
+
     def get_stats(self) -> Dict[str, Any]:
         """Get current collection statistics."""
         return {
             'crunchyroll_pages': len(self.crunchyroll_pages),
             'anilist_searches': len(self.anilist_searches),
             'matching_decisions': len(self.matching_decisions),
+            'changeset_entries': len(self.changeset_entries),
             'outcomes': {
                 'matched': sum(1 for d in self.matching_decisions if d.get('outcome') == 'matched'),
                 'no_match': sum(1 for d in self.matching_decisions if d.get('outcome') == 'no_match'),

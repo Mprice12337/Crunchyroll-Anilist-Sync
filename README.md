@@ -97,6 +97,15 @@ python main.py --dry-run
 # Debug matching mode (captures diagnostic data, implies --dry-run)
 python main.py --debug-matching --max-pages 10
 
+# Save changeset for review before applying (implies --dry-run)
+python main.py --save-changeset --max-pages 10
+
+# Apply a previously saved changeset
+python main.py --apply-changeset _cache/changesets/changeset_20260122_103045.json
+
+# Disable early stopping to scan all requested pages (useful for full scans)
+python main.py --no-early-stop --max-pages 20
+
 # Limit history pages to scrape
 python main.py --max-pages 5
 
@@ -122,6 +131,9 @@ python main.py --clear-cache
 - `--no-headless`: Show browser window (useful for debugging)
 - `--dry-run`: Show what would be updated without making changes
 - `--debug-matching`: Enable detailed matching diagnostics and export debug data (implies --dry-run)
+- `--save-changeset`: Save AniList updates to a changeset file for review before applying (implies --dry-run and --no-early-stop)
+- `--apply-changeset FILE`: Apply a previously saved changeset file (skips Crunchyroll scraping)
+- `--no-early-stop`: Disable early stopping when most items are already synced (useful for full scans)
 - `--max-pages N`: Maximum number of history pages to scrape (default: 10)
 - `--clear-cache`: Clear all cached data before running
 
@@ -305,6 +317,129 @@ The matching system includes several smart features:
 - **Cumulative episode mapping** for absolute vs per-season numbering
 - **Enhanced movie matching** using actual movie titles from Crunchyroll metadata
 - **Fallback mechanisms** for edge cases and franchise titles
+
+## Changeset Workflow
+
+The changeset workflow allows you to review and approve AniList updates before they are applied. This is useful for:
+- **Testing new matching algorithms** without accidentally updating your list
+- **Reviewing updates** before committing them to AniList
+- **Batch processing** updates at a later time
+- **Sharing updates** with others for review
+
+### How It Works
+
+The changeset workflow has two stages:
+
+#### Stage 1: Save Changeset (Dry Run)
+
+Run a sync with `--save-changeset` to:
+1. Scrape your Crunchyroll watch history
+2. Match anime and determine what updates would be made
+3. Save all updates to a changeset file in `_cache/changesets/`
+4. **No changes are made to AniList**
+
+```bash
+# Save changeset for the last 10 pages of history
+python main.py --save-changeset --max-pages 10
+
+# Output: Changeset saved to _cache/changesets/changeset_20260122_103045.json
+```
+
+#### Stage 2: Apply Changeset (Wet Run)
+
+After reviewing the changeset file, apply it with `--apply-changeset`:
+1. Loads the changeset file
+2. Authenticates with AniList
+3. Applies each update in sequence
+4. Reports success/failure for each update
+5. **Skips Crunchyroll scraping entirely**
+
+```bash
+# Apply the changeset
+python main.py --apply-changeset _cache/changesets/changeset_20260122_103045.json
+```
+
+### Changeset File Format
+
+Changeset files are JSON with this structure:
+
+```json
+{
+  "created_at": "2026-01-22T10:30:00",
+  "session_timestamp": "20260122_103045",
+  "total_changes": 3,
+  "changes": [
+    {
+      "anime_id": 154587,
+      "anime_title": "Sousou no Frieren 2nd Season",
+      "progress": 1,
+      "total_episodes": 28,
+      "update_type": "normal",
+      "cr_source": {
+        "series": "Frieren: Beyond Journey's End",
+        "season": 2,
+        "episode": 1,
+        "is_movie": false
+      },
+      "timestamp": "2026-01-22T10:30:15"
+    }
+  ]
+}
+```
+
+### Reviewing a Changeset
+
+Before applying, review the changeset to ensure the matches are correct:
+
+1. **Check the JSON file** directly for detailed information
+2. **Verify anime_id and anime_title** match what you expect
+3. **Check progress values** are correct
+4. **Review cr_source** to see the original Crunchyroll data
+5. **Look for update_type** to understand what kind of update it is:
+   - `normal`: Standard progress update
+   - `rewatch`: Rewatch detected
+   - `new_series`: Starting a new series
+
+### Use Cases
+
+**Test before committing:**
+```bash
+# Save changeset with new matching algorithm
+python main.py --save-changeset --max-pages 5
+
+# Review the changeset file
+cat _cache/changesets/changeset_*.json | jq '.changes[] | {title: .anime_title, progress: .progress}'
+
+# Apply if satisfied
+python main.py --apply-changeset _cache/changesets/changeset_*.json
+```
+
+**Combine with debug matching:**
+```bash
+# Run both debug matching and save changeset
+python main.py --debug-matching --save-changeset --max-pages 10
+
+# Review both the matching diagnostics AND the changeset
+# Apply when confident
+python main.py --apply-changeset _cache/changesets/changeset_*.json
+```
+
+**Schedule updates:**
+```bash
+# During the day: save changeset (fast, no updates)
+python main.py --save-changeset
+
+# At night: apply changeset (no scraping needed)
+python main.py --apply-changeset _cache/changesets/changeset_20260122_103045.json
+```
+
+### Important Notes
+
+- **Changesets are timestamped** - each run creates a new file
+- **Changesets are independent** - applying one doesn't affect others
+- **No Crunchyroll auth needed** - `--apply-changeset` only needs AniList auth
+- **Changesets can be edited** - manually fix matches in JSON before applying
+- **Idempotent updates** - applying the same changeset twice won't cause issues (AniList handles duplicates)
 
 ## Documentation
 
