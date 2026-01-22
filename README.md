@@ -13,7 +13,7 @@ A simplified Python application that automatically syncs your Crunchyroll watch 
 - 🚫 Global deduplication prevents duplicate processing across pages
 - 🐳 Docker support with cron scheduling for automated syncs
 - 🛡️ Optional FlareSolverr integration for Cloudflare bypass
-- 🔍 Debug mode and dry-run support for testing
+- 🔍 Debug mode, dry-run support, and detailed matching diagnostics for testing
 - 🔧 Simple configuration via environment variables
 
 ## Quick Start
@@ -94,6 +94,9 @@ python main.py --debug
 # Dry run (see what would be updated without making changes)
 python main.py --dry-run
 
+# Debug matching mode (captures diagnostic data, implies --dry-run)
+python main.py --debug-matching --max-pages 10
+
 # Limit history pages to scrape
 python main.py --max-pages 5
 
@@ -118,6 +121,7 @@ python main.py --clear-cache
 - `--headless`: Run browser in headless mode (default)
 - `--no-headless`: Show browser window (useful for debugging)
 - `--dry-run`: Show what would be updated without making changes
+- `--debug-matching`: Enable detailed matching diagnostics and export debug data (implies --dry-run)
 - `--max-pages N`: Maximum number of history pages to scrape (default: 10)
 - `--clear-cache`: Clear all cached data before running
 
@@ -248,6 +252,59 @@ FLARESOLVERR_URL=http://localhost:8191
    - The anime might not be on AniList
    - Title matching might fail for obscure shows
    - Check the debug logs for matching details
+
+## Debug Matching Mode
+
+The `--debug-matching` flag enables comprehensive diagnostic data collection to help troubleshoot anime matching issues. This mode automatically runs in dry-run mode (no AniList updates) and exports detailed matching data to `_cache/debug/`.
+
+### Usage
+
+```bash
+# Capture matching diagnostics for 10 pages of history
+python main.py --debug-matching --max-pages 10
+```
+
+### Output Files
+
+All files are timestamped (e.g., `_YYYYMMDD_HHMMSS`) and saved to `_cache/debug/`:
+
+1. **`crunchyroll_history_*.json`** - Raw and parsed Crunchyroll watch history data
+   - Contains the original API responses and parsed episode data
+   - Useful for verifying what Crunchyroll is reporting
+
+2. **`anilist_searches_*.json`** - All AniList search queries and results
+   - Shows what searches were made and what candidates were returned
+   - Includes similarity scores for each candidate
+
+3. **`matching_decisions_*.json`** - Detailed decision records for each episode
+   - Input data (CR title, season, episode)
+   - All candidates considered with scores
+   - Season structure mappings
+   - Final selection and reasoning
+
+4. **`matching_summary_*.csv`** - Spreadsheet-friendly summary
+   - Quick overview of all matching decisions
+   - Columns: CR Title, Season, Episode, Top Match, Selected Anime, Outcome, Reason
+   - Easy to import into Excel/Google Sheets for analysis
+
+### Use Cases
+
+- **Troubleshooting mismatches**: Identify why specific anime are being matched incorrectly
+- **Testing improvements**: Validate matching algorithm changes before deployment
+- **Understanding the algorithm**: See how season structures are built and episodes are mapped
+- **Reporting issues**: Include debug files when reporting matching problems
+
+### Matching Algorithm Features
+
+The matching system includes several smart features:
+
+- **Similarity threshold filtering** (0.7 minimum) to exclude unrelated anime
+- **Format-based filtering** to exclude supplemental content (commentary, recap, etc.)
+- **Intelligent season structure building** from search results
+- **TV format preference** over ONA (Original Net Animation) for main seasons
+- **Cumulative episode mapping** for absolute vs per-season numbering
+- **Enhanced movie matching** using actual movie titles from Crunchyroll metadata
+- **Fallback mechanisms** for edge cases and franchise titles
 
 ## Documentation
 
